@@ -1,36 +1,64 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# MeshInk
+
+MeshInk is a real-time, collaborative whiteboard application featuring an infinite canvas. It allows multiple users to draw together seamlessly, with features designed for a smooth and intuitive experience.
+
+## Features
+
+- **Infinite Canvas:** Pan and zoom on an endless canvas, providing limitless space for your ideas.
+- **Real-Time Collaboration:** Powered by Ably, all drawings are synced with other users in real-time.
+- **Drawing Tools:** Switch between a pen and an eraser, with adjustable stroke widths and a full-color picker.
+- **Dynamic Grid:** Toggle a dynamic grid to help with alignment and perspective.
+- **Customization:** Switch between light and dark themes to suit your preference.
+- **Session Control:** A "Clear Canvas" button allows you to reset the drawing board for everyone.
+
+## Tech Stack
+
+- **Framework:** [Next.js](https://nextjs.org/)
+- **UI Library:** [React](https://reactjs.org/)
+- **Canvas:** [Konva.js](https://konvajs.org/)
+- **Real-time:** [Ably](https://ably.com/)
+- **Styling:** [Tailwind CSS](https://tailwindcss.com/)
+- **Language:** [TypeScript](https://www.typescriptlang.org/)
 
 ## Getting Started
 
-First, run the development server:
+To get a local copy up and running, follow these simple steps.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+### Prerequisites
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- Node.js (v18 or later)
+- npm
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Installation
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1.  **Clone the repository:**
+    ```sh
+    git clone https://github.com/PawiX25/MeshInk.git
+    cd MeshInk
+    ```
 
-## Learn More
+2.  **Install dependencies:**
+    ```sh
+    npm install
+    ```
 
-To learn more about Next.js, take a look at the following resources:
+3.  **Set up environment variables:**
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+    Create a `.env.local` file in the `MeshInk` directory by copying the example:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+    ```sh
+    cp .env.local.example .env.local
+    ```
 
-## Deploy on Vercel
+    You will need to add your Ably API key to this file. You can get one for free by signing up at [ably.com](https://ably.com/).
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+    ```
+    ABLY_API_KEY="your-ably-api-key"
+    ```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+4.  **Run the development server:**
+    ```sh
+    npm run dev
+    ```
+
+    Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
