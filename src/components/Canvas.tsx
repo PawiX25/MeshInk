@@ -97,7 +97,7 @@ const Grid = ({ stage, width, height, theme }: { stage: StageState, width: numbe
   return <Layer>{lines}</Layer>;
 };
 
-const Canvas = () => {
+const Canvas = ({ roomId }: { roomId: string }) => {
   const GridIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 12h18M12 3v18"/></svg>;
   const [lines, setLines] = useState<LineData[]>([]);
   const [stage, setStage] = useState<StageState>({ scale: 1, x: 0, y: 0 });
@@ -120,13 +120,28 @@ const Canvas = () => {
     return () => window.removeEventListener('resize', updateDimensions);
   }, []);
 
-  const { channel } = useChannel('canvas-drawings', (message) => {
+  const { channel } = useChannel(`canvas-drawings:${roomId}`, (message) => {
     if (message.clientId === ably.auth.clientId) return;
-    if (message.name === 'new-line') setLines((prev) => [...prev, message.data]);
-    else if (message.name === 'update-line') setLines((prev) => prev.map((l) => (l.id === message.data.id ? message.data : l)));
-    else if (message.name === 'stage-update') setStage(message.data);
-    else if (message.name === 'clear-canvas') setLines([]);
+
+    if (message.name === 'new-line') {
+      setLines((prev) => [...prev, message.data]);
+    } else if (message.name === 'update-line') {
+      setLines((prev) => prev.map((l) => (l.id === message.data.id ? message.data : l)));
+    } else if (message.name === 'stage-update') {
+      setStage(message.data);
+    } else if (message.name === 'clear-canvas') {
+      setLines([]);
+    } else if (message.name === 'request-state') {
+      channel.publish('sync-state', { lines, stage });
+    } else if (message.name === 'sync-state') {
+      setLines(message.data.lines);
+      setStage(message.data.stage);
+    }
   });
+
+  useEffect(() => {
+    channel.publish('request-state', {});
+  }, [channel]);
 
   const publishStageUpdate = useCallback(throttle((s: StageState) => channel.publish('stage-update', s), 100), [channel]);
   const publishLineUpdate = useCallback(throttle((l: LineData) => channel.publish('update-line', l), 50), [channel]);
