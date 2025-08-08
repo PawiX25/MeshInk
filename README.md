@@ -4,8 +4,10 @@ MeshInk is a real-time, collaborative whiteboard application featuring an infini
 
 ## Features
 
+- **Multi-Room Collaboration:** Create private, shareable canvas rooms and draw with others in real-time.
 - **Infinite Canvas:** Pan and zoom on an endless canvas, providing limitless space for your ideas.
-- **Real-Time Collaboration:** Powered by Ably, all drawings are synced with other users in real-time.
+- **Session Sync:** Join a session at any time and see the complete drawing history from the start.
+- **Easy Sharing:** Instantly copy a shareable link or room code to invite others.
 - **Drawing Tools:** Switch between a pen and an eraser, with adjustable stroke widths and a full-color picker.
 - **Dynamic Grid:** Toggle a dynamic grid to help with alignment and perspective.
 - **Customization:** Switch between light and dark themes to suit your preference.

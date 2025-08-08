@@ -42,10 +42,9 @@ const InvalidRoomPage = () => {
 export default function Page() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const router = useRouter();
-  const roomId = Array.isArray(params.roomId) ? params.roomId[0] : params.roomId;
+  const roomId = params ? (Array.isArray(params.roomId) ? params.roomId[0] : params.roomId) : null;
   
-  const [isCreator] = useState(() => searchParams.get('creator') === 'true');
+  const [isCreator] = useState(() => !!(searchParams && searchParams.get('creator')));
 
   const isValid = typeof roomId === 'string' && roomId.length === 7;
 

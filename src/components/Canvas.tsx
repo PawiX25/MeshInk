@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Stage, Layer, Line, Rect } from 'react-konva';
+import { Stage, Layer, Line } from 'react-konva';
 import { useChannel, useAbly } from 'ably/react';
 import Konva from 'konva';
 import { throttle } from 'lodash';
