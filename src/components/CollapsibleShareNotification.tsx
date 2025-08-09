@@ -47,13 +47,18 @@ export const CollapsibleShareNotification = ({
     });
   };
 
+  const ease = 'ease-[cubic-bezier(.19,1,.22,1)]';
+  const duration = 'duration-[650ms]';
+  const tabDelay = 'delay-[90ms]'; // tab/arrow follow panel by 90ms
+
   return (
     <div className="fixed top-4 right-0 z-50 font-sans">
       <div className="flex items-stretch">
         <div
           className={clsx(
-            'overflow-hidden transition-[width] duration-300 ease-out',
-            isExpanded ? 'w-72' : 'w-0'
+            'w-72 transition-[transform,margin] will-change-transform',
+            duration, ease,
+            isExpanded ? 'translate-x-0 mr-0' : 'translate-x-full -mr-72'
           )}
         >
           <div
@@ -101,19 +106,24 @@ export const CollapsibleShareNotification = ({
           onClick={() => setIsExpanded(v => !v)}
           className={clsx(
             isExpanded
-              ? 'self-stretch w-10 rounded-l-none rounded-r-xl'
-              : 'h-10 w-8 self-center rounded-l-xl rounded-r-none',
+              ? `self-stretch w-10 rounded-l-none rounded-r-xl ${tabDelay}`
+              : 'h-10 w-8 self-center rounded-l-xl rounded-r-none hover:bg-slate-700',
             'grid place-items-center',
-            'transition-[width,height,border-radius] duration-300 ease-out',
-            'bg-slate-800 text-white hover:bg-slate-700',
+            `transition-[width,height,border-radius,transform,background-color] will-change-transform ${duration} ${ease}`,
+            'bg-slate-800 text-white',
             'border border-slate-700 border-l-0 -ml-px',
-            'shadow-lg select-none'
+            'shadow-lg select-none cursor-pointer'
           )}
-          title={isExpanded ? 'Zwiń' : 'Rozwiń'}
           aria-expanded={isExpanded}
           aria-controls="share-panel"
         >
-          <span className={clsx('transition-transform duration-300', { 'rotate-180': isExpanded })}>
+          <span
+            className={clsx(
+              `transition-transform ${duration} ${ease}`,
+              isExpanded ? tabDelay : '',
+              { 'rotate-180': isExpanded }
+            )}
+          >
             <ChevronLeftIcon />
           </span>
         </button>
