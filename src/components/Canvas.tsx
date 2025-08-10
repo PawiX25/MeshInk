@@ -1,11 +1,12 @@
 'use client';
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Stage, Layer, Line } from 'react-konva';
+import { Stage, Layer, Line, Shape } from 'react-konva';
 import { useChannel, useAbly } from 'ably/react';
 import Konva from 'konva';
 import { throttle } from 'lodash';
 import { useTheme } from 'next-themes';
+import { animate } from 'framer-motion';
 import clsx from 'clsx';
 import { HexColorPicker } from 'react-colorful';
 
@@ -46,6 +47,7 @@ const EraserIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" heig
 const HandIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0" /><path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2" /><path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8" /><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-4a2 2 0 1 1 0-4h4a4 4 0 1 0 0-8" /></svg>;
 const SunIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></svg>;
 const MoonIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" /></svg>;
+const HomeIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>;
 const TrashIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></svg>;
 
 const ColorPicker = ({ color, onChange }: { color: string, onChange: (newColor: string) => void }) => {
@@ -66,45 +68,98 @@ const ColorPicker = ({ color, onChange }: { color: string, onChange: (newColor: 
   );
 };
 
-const Grid = ({ stage, width, height, theme }: { stage: StageState, width: number, height: number, theme: string | undefined }) => {
-  const gridSize = 50;
+const GridLayer = ({ stage, width, height, theme }: { stage: StageState, width: number, height: number, theme: string | undefined }) => {
+  const baseStep = 50;
   const strokeColor = theme === 'dark' ? '#2c3e50' : '#e0e0e0';
-  const strokeWidth = 1;
+  const strokeWidthWorld = 1;
 
-  const lines = [];
-  const scaledGridSize = gridSize * stage.scale;
+  const sceneFunc = (context: Konva.Context) => {
+    context.beginPath();
 
-  const stageRect = {
-    x1: -stage.x / stage.scale,
-    y1: -stage.y / stage.scale,
-    x2: (width - stage.x) / stage.scale,
-    y2: (height - stage.y) / stage.scale,
+    const buffer = 0.50;
+    const stageRect = {
+      x1: -stage.x / stage.scale - (width * buffer) / stage.scale,
+      y1: -stage.y / stage.scale - (height * buffer) / stage.scale,
+      x2: (width - stage.x) / stage.scale + (width * buffer) / stage.scale,
+      y2: (height - stage.y) / stage.scale + (height * buffer) / stage.scale,
+    };
+
+    const step = baseStep;
+
+    const startX = Math.floor(stageRect.x1 / step) * step;
+    const endX = Math.ceil(stageRect.x2 / step) * step;
+    const startY = Math.floor(stageRect.y1 / step) * step;
+    const endY = Math.ceil(stageRect.y2 / step) * step;
+
+    const majorStep = step * 10;
+    const superStep = step * 50;
+
+    const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+    const smoothstep = (e0: number, e1: number, x: number) => {
+      const t = clamp((x - e0) / (e1 - e0), 0, 1);
+      return t * t * (3 - 2 * t);
+    };
+    const s = stage.scale;
+    const minorAlpha = smoothstep(0.02, 0.05, s);
+    const majorAlpha = smoothstep(0.006, 0.02, s);
+    const superAlpha = 1;
+
+    const drawTier = (gap: number, alpha: number, pxWidth: number) => {
+      if (alpha <= 0.08) return;
+      context.beginPath();
+      const x0 = Math.ceil(startX / gap) * gap;
+      const y0 = Math.ceil(startY / gap) * gap;
+      const alignX = (xWorld: number) => {
+        const sx = xWorld * stage.scale + stage.x;
+        const aligned = Math.floor(sx) + 0.5;
+        return (aligned - stage.x) / stage.scale;
+      };
+      const alignY = (yWorld: number) => {
+        const sy = yWorld * stage.scale + stage.y;
+        const aligned = Math.floor(sy) + 0.5;
+        return (aligned - stage.y) / stage.scale;
+      };
+      for (let x = x0; x <= endX; x += gap) {
+        const ax = alignX(x);
+        context.moveTo(ax, startY);
+        context.lineTo(ax, endY);
+      }
+      for (let y = y0; y <= endY; y += gap) {
+        const ay = alignY(y);
+        context.moveTo(startX, ay);
+        context.lineTo(endX, ay);
+      }
+      context.setAttr('strokeStyle', strokeColor);
+      context.setAttr('globalAlpha', alpha);
+      context.setAttr('lineWidth', (pxWidth || 1) / stage.scale);
+      context.setAttr('lineCap', 'butt');
+      context.setAttr('lineJoin', 'miter');
+      context.stroke();
+      context.setAttr('globalAlpha', 1);
+    };
+
+    drawTier(step, minorAlpha, 1);
+    drawTier(majorStep, majorAlpha, 1.5);
+    drawTier(superStep, superAlpha, 2);
   };
 
-  const startX = Math.floor(stageRect.x1 / gridSize) * gridSize;
-  const endX = Math.ceil(stageRect.x2 / gridSize) * gridSize;
-  const startY = Math.floor(stageRect.y1 / gridSize) * gridSize;
-  const endY = Math.ceil(stageRect.y2 / gridSize) * gridSize;
-
-  for (let i = startX; i < endX; i += gridSize) {
-    lines.push(<Line key={`v-${i}`} points={[i, startY, i, endY]} stroke={strokeColor} strokeWidth={strokeWidth / stage.scale} />);
-  }
-
-  for (let i = startY; i < endY; i += gridSize) {
-    lines.push(<Line key={`h-${i}`} points={[startX, i, endX, i]} stroke={strokeColor} strokeWidth={strokeWidth / stage.scale} />);
-  }
-
-  return <Layer>{lines}</Layer>;
+  return (
+    <Layer listening={false} hitGraphEnabled={false}>
+      <Shape listening={false} hitGraphEnabled={false} sceneFunc={sceneFunc} />
+    </Layer>
+  );
 };
 
 const Canvas = ({ roomId }: { roomId: string }) => {
   const GridIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 12h18M12 3v18"/></svg>;
+
   const [lines, setLines] = useState<LineData[]>([]);
   const [stage, setStage] = useState<StageState>({ scale: 1, x: 0, y: 0 });
   const [tool, setTool] = useState<'pen' | 'pan' | 'eraser'>('pen');
   const [color, setColor] = useState('#000000');
   const [strokeWidth, setStrokeWidth] = useState(5);
   const [isGridVisible, setGridVisible] = useState(true);
+  
   const isDrawing = useRef(false);
   const stageRef = useRef<Konva.Stage>(null);
   const ably = useAbly();
@@ -142,6 +197,14 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   useEffect(() => {
     channel.publish('request-state', {});
   }, [channel]);
+
+  useEffect(() => {
+    if (theme === 'dark' && color === '#000000') {
+      setColor('#ffffff');
+    } else if (theme === 'light' && color === '#ffffff') {
+      setColor('#000000');
+    }
+  }, [theme, color]);
 
   const publishStageUpdate = useCallback(throttle((s: StageState) => channel.publish('stage-update', s), 100), [channel]);
   const publishLineUpdate = useCallback(throttle((l: LineData) => channel.publish('update-line', l), 50), [channel]);
@@ -181,7 +244,9 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     });
   };
 
-  const handleMouseUp = () => { isDrawing.current = false; };
+  const handleMouseUp = () => {
+    isDrawing.current = false;
+  };
 
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault();
@@ -201,16 +266,49 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const handleDragEnd = () => {
     const stage = stageRef.current;
     if (!stage) return;
-    const newStageState = { scale: stage.scaleX(), ...stage.position() };
+    const newStageState = { scale: stage.scaleX(), ...stage.position() } as StageState;
     setStage(newStageState);
     publishStageUpdate(newStageState);
   };
+
+  const handleDragMove = throttle((e: Konva.KonvaEventObject<DragEvent>) => {
+    const stage = e.target;
+    setStage({ scale: stage.scaleX(), x: stage.x(), y: stage.y() });
+  }, 50);
+
+  useEffect(() => {
+    publishStageUpdate(stage);
+  }, [stage, publishStageUpdate]);
 
   const handleClearCanvas = () => {
     if (window.confirm('Are you sure you want to clear the entire canvas for everyone?')) {
       setLines([]);
       channel.publish('clear-canvas', {});
     }
+  };
+
+  const handleResetView = () => {
+    animate(stage.scale, 1, {
+      duration: 0.8,
+      ease: 'easeInOut',
+      onUpdate: (latest) => {
+        setStage((prev) => ({ ...prev, scale: latest }));
+      },
+    });
+    animate(stage.x, 0, {
+      duration: 0.8,
+      ease: 'easeInOut',
+      onUpdate: (latest) => {
+        setStage((prev) => ({ ...prev, x: latest }));
+      },
+    });
+    animate(stage.y, 0, {
+      duration: 0.8,
+      ease: 'easeInOut',
+      onUpdate: (latest) => {
+        setStage((prev) => ({ ...prev, y: latest }));
+      },
+    });
   };
 
   useEffect(() => {
@@ -222,7 +320,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   }, [tool]);
 
   const ToolButton = ({ name, children }: { name: 'pen' | 'pan' | 'eraser', children: React.ReactNode }) => (
-    <button onClick={() => setTool(name)} title={name.charAt(0).toUpperCase() + name.slice(1)} className={clsx("p-3 rounded-lg", { 'bg-blue-500 text-white': tool === name, 'hover:bg-slate-200 dark:hover:bg-slate-700': tool !== name })}>
+    <button onClick={() => setTool(name)} title={name.charAt(0).toUpperCase() + name.slice(1)} className={clsx('p-3 rounded-lg', { 'bg-blue-500 text-white': tool === name, 'hover:bg-slate-200 dark:hover:bg-slate-700': tool !== name })}>
       {children}
     </button>
   );
@@ -251,6 +349,9 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Toggle Theme" className="p-3 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
             {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
           </button>
+          <button onClick={handleResetView} title="Reset View" className="p-3 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
+            <HomeIcon />
+          </button>
           <button onClick={handleClearCanvas} title="Clear Canvas" className="p-3 hover:bg-red-500 hover:text-white rounded-lg">
             <TrashIcon />
           </button>
@@ -264,15 +365,16 @@ const Canvas = ({ roomId }: { roomId: string }) => {
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onWheel={handleWheel}
+        onDragMove={handleDragMove}
         onDragEnd={handleDragEnd}
-        draggable={tool === 'pan'}
+  draggable={tool === 'pan'}
         scaleX={stage.scale}
         scaleY={stage.scale}
         x={stage.x}
         y={stage.y}
         ref={stageRef}
       >
-        {isGridVisible && <Grid stage={stage} width={dimensions.width} height={dimensions.height} theme={theme} />}
+  {isGridVisible && <GridLayer stage={stage} width={dimensions.width} height={dimensions.height} theme={theme} />}
         <Layer>
           {lines.map((line) => (
             <Line
@@ -280,9 +382,10 @@ const Canvas = ({ roomId }: { roomId: string }) => {
               points={line.points}
               stroke={line.color}
               strokeWidth={line.strokeWidth}
-              tension={0.5}
               lineCap="round"
               lineJoin="round"
+              perfectDrawEnabled={false}
+              shadowForStrokeEnabled={false}
               globalCompositeOperation={line.tool === 'eraser' ? 'destination-out' : 'source-over'}
             />
           ))}
