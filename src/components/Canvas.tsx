@@ -234,7 +234,8 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     } else if (message.name === 'update-line') {
       setLines((prev) => prev.map((l) => (l.id === message.data.id ? message.data : l)));
     } else if (message.name === 'stage-update') {
-      setStage(message.data);
+      zoomTargetRef.current = message.data as StageState;
+      ensureZoomRAF();
     } else if (message.name === 'clear-canvas') {
       setLines([]);
     } else if (message.name === 'request-state') {
@@ -319,6 +320,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     const newTarget = { scale: newScale, x: newX, y: newY } as StageState;
     zoomTargetRef.current = newTarget;
     ensureZoomRAF();
+  publishStageUpdate(newTarget);
   };
 
   const handleDragEnd = () => {
@@ -330,13 +332,12 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   };
 
   const handleDragMove = throttle((e: Konva.KonvaEventObject<DragEvent>) => {
-    const stage = e.target;
-    setStage({ scale: stage.scaleX(), x: stage.x(), y: stage.y() });
+    const s = e.target as Konva.Stage;
+    const next = { scale: s.scaleX(), x: s.x(), y: s.y() } as StageState;
+    setStage(next);
+    publishStageUpdate(next);
   }, 50);
 
-  useEffect(() => {
-    publishStageUpdate(stage);
-  }, [stage, publishStageUpdate]);
 
   const handleClearCanvas = () => {
     if (window.confirm('Are you sure you want to clear the entire canvas for everyone?')) {
@@ -346,6 +347,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   };
 
   const handleResetView = () => {
+    publishStageUpdate({ scale: 1, x: 0, y: 0 });
     animate(stage.scale, 1, {
       duration: 0.8,
       ease: 'easeInOut',
@@ -370,6 +372,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   };
 
   useEffect(() => {
+    isDrawing.current = false;
     const stage = stageRef.current;
     if (stage) {
       const cursor = { pen: 'crosshair', pan: 'grab', eraser: 'cell' }[tool];
