@@ -71,12 +71,9 @@ const ColorPicker = ({ color, onChange }: { color: string, onChange: (newColor: 
 const GridLayer = ({ stage, width, height, theme }: { stage: StageState, width: number, height: number, theme: string | undefined }) => {
   const baseStep = 50;
   const strokeColor = theme === 'dark' ? '#2c3e50' : '#e0e0e0';
-  const strokeWidthWorld = 1;
 
   const sceneFunc = (context: Konva.Context) => {
-    context.beginPath();
-
-    const buffer = 0.50;
+    const buffer = 0.15;
     const stageRect = {
       x1: -stage.x / stage.scale - (width * buffer) / stage.scale,
       y1: -stage.y / stage.scale - (height * buffer) / stage.scale,
@@ -84,47 +81,53 @@ const GridLayer = ({ stage, width, height, theme }: { stage: StageState, width: 
       y2: (height - stage.y) / stage.scale + (height * buffer) / stage.scale,
     };
 
-    const step = baseStep;
-
-    const startX = Math.floor(stageRect.x1 / step) * step;
-    const endX = Math.ceil(stageRect.x2 / step) * step;
-    const startY = Math.floor(stageRect.y1 / step) * step;
-    const endY = Math.ceil(stageRect.y2 / step) * step;
-
-    const majorStep = step * 10;
-    const superStep = step * 50;
-
     const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
     const smoothstep = (e0: number, e1: number, x: number) => {
       const t = clamp((x - e0) / (e1 - e0), 0, 1);
       return t * t * (3 - 2 * t);
     };
-    const s = stage.scale;
-    const minorAlpha = smoothstep(0.02, 0.05, s);
-    const majorAlpha = smoothstep(0.006, 0.02, s);
-    const superAlpha = 1;
+
+    const s = Math.max(1e-12, Math.min(1e12, stage.scale));
+    const targetPx = 32;
+    const fRaw = Math.log2((targetPx + 1e-6) / (baseStep * s));
+    const f = Math.max(-60, Math.min(60, fRaw));
+    const k = Math.floor(f);
+    const frac = f - k;
+    const t = smoothstep(0.2, 0.8, frac);
+
+    const stepLo = baseStep * Math.pow(2, k);
+    const stepHi = stepLo * 2;
+    const majorLo = stepLo * 5;
+    const majorHi = stepHi * 5;
+
+    const startEndForGap = (gap: number) => ({
+      startX: Math.floor(stageRect.x1 / gap) * gap,
+      endX: Math.ceil(stageRect.x2 / gap) * gap,
+      startY: Math.floor(stageRect.y1 / gap) * gap,
+      endY: Math.ceil(stageRect.y2 / gap) * gap,
+    });
+
+    const alignX = (xWorld: number) => {
+      const sx = xWorld * stage.scale + stage.x;
+      const aligned = Math.floor(sx) + 0.5;
+      return (aligned - stage.x) / stage.scale;
+    };
+    const alignY = (yWorld: number) => {
+      const sy = yWorld * stage.scale + stage.y;
+      const aligned = Math.floor(sy) + 0.5;
+      return (aligned - stage.y) / stage.scale;
+    };
 
     const drawTier = (gap: number, alpha: number, pxWidth: number) => {
-      if (alpha <= 0.08) return;
+      if (alpha <= 0.02) return;
+      const { startX, endX, startY, endY } = startEndForGap(gap);
       context.beginPath();
-      const x0 = Math.ceil(startX / gap) * gap;
-      const y0 = Math.ceil(startY / gap) * gap;
-      const alignX = (xWorld: number) => {
-        const sx = xWorld * stage.scale + stage.x;
-        const aligned = Math.floor(sx) + 0.5;
-        return (aligned - stage.x) / stage.scale;
-      };
-      const alignY = (yWorld: number) => {
-        const sy = yWorld * stage.scale + stage.y;
-        const aligned = Math.floor(sy) + 0.5;
-        return (aligned - stage.y) / stage.scale;
-      };
-      for (let x = x0; x <= endX; x += gap) {
+      for (let x = Math.ceil(startX / gap) * gap; x <= endX; x += gap) {
         const ax = alignX(x);
         context.moveTo(ax, startY);
         context.lineTo(ax, endY);
       }
-      for (let y = y0; y <= endY; y += gap) {
+      for (let y = Math.ceil(startY / gap) * gap; y <= endY; y += gap) {
         const ay = alignY(y);
         context.moveTo(startX, ay);
         context.lineTo(endX, ay);
@@ -138,9 +141,14 @@ const GridLayer = ({ stage, width, height, theme }: { stage: StageState, width: 
       context.setAttr('globalAlpha', 1);
     };
 
-    drawTier(step, minorAlpha, 1);
-    drawTier(majorStep, majorAlpha, 1.5);
-    drawTier(superStep, superAlpha, 2);
+    const minorAlphaLo = (1 - t) * 0.45;
+    const minorAlphaHi = t * 0.45;
+    const majorAlphaLo = (1 - t) * 0.9;
+    const majorAlphaHi = t * 0.9;
+    drawTier(stepLo, minorAlphaLo, 1);
+    drawTier(stepHi, minorAlphaHi, 1);
+    drawTier(majorLo, majorAlphaLo, 1.5);
+    drawTier(majorHi, majorAlphaHi, 2);
   };
 
   return (
@@ -162,6 +170,9 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   
   const isDrawing = useRef(false);
   const stageRef = useRef<Konva.Stage>(null);
+  const zoomTargetRef = useRef<StageState>({ scale: 1, x: 0, y: 0 });
+  const rafRef = useRef<number | null>(null);
+  const lastTimeRef = useRef<number | null>(null);
   const ably = useAbly();
   const { theme, setTheme } = useTheme();
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
@@ -174,6 +185,46 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     window.addEventListener('resize', updateDimensions);
     return () => window.removeEventListener('resize', updateDimensions);
   }, []);
+
+  useEffect(() => {
+    zoomTargetRef.current = stage;
+  }, []);
+
+  const ensureZoomRAF = useCallback(() => {
+    if (rafRef.current != null) return;
+    const step = (ts: number) => {
+      const target = zoomTargetRef.current;
+      const current = stageRef.current
+        ? ({ scale: stageRef.current.scaleX(), x: stageRef.current.x(), y: stageRef.current.y() } as StageState)
+        : stage;
+
+      const last = lastTimeRef.current ?? ts;
+  const dt = Math.min(0.05, Math.max(0, (ts - last) / 1000));
+      lastTimeRef.current = ts;
+  const k = 14;
+      const alpha = 1 - Math.exp(-k * dt);
+
+      const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+      const ns = lerp(current.scale, target.scale, alpha);
+      const nx = lerp(current.x, target.x, alpha);
+      const ny = lerp(current.y, target.y, alpha);
+
+      setStage({ scale: ns, x: nx, y: ny });
+
+  const done =
+        Math.abs(ns - target.scale) < 0.0005 &&
+        Math.abs(nx - target.x) < 0.25 &&
+        Math.abs(ny - target.y) < 0.25;
+      if (!done) {
+        rafRef.current = requestAnimationFrame(step);
+      } else {
+        setStage(target);
+        rafRef.current = null;
+        lastTimeRef.current = null;
+      }
+    };
+    rafRef.current = requestAnimationFrame(step);
+  }, [stage]);
 
   const { channel } = useChannel(`canvas-drawings:${roomId}`, (message) => {
     if (message.clientId === ably.auth.clientId) return;
@@ -252,15 +303,22 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     e.evt.preventDefault();
     const stage = stageRef.current;
     if (!stage) return;
-    const scaleBy = 1.1;
     const oldScale = stage.scaleX();
     const pointer = stage.getPointerPosition();
     if (!pointer) return;
     const mousePointTo = { x: (pointer.x - stage.x()) / oldScale, y: (pointer.y - stage.y()) / oldScale };
-    const newScale = e.evt.deltaY > 0 ? oldScale / scaleBy : oldScale * scaleBy;
-    const newStageState = { scale: newScale, x: pointer.x - mousePointTo.x * newScale, y: pointer.y - mousePointTo.y * newScale };
-    setStage(newStageState);
-    publishStageUpdate(newStageState);
+
+  const zoomIntensity = 0.0015;
+  const direction = -e.evt.deltaY;
+    const scaleFactor = Math.exp(direction * zoomIntensity);
+  const newScaleUnclamped = oldScale * scaleFactor;
+  const newScale = Math.max(1e-9, Math.min(1e9, newScaleUnclamped));
+
+    const newX = pointer.x - mousePointTo.x * newScale;
+    const newY = pointer.y - mousePointTo.y * newScale;
+    const newTarget = { scale: newScale, x: newX, y: newY } as StageState;
+    zoomTargetRef.current = newTarget;
+    ensureZoomRAF();
   };
 
   const handleDragEnd = () => {
@@ -325,6 +383,55 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     </button>
   );
 
+  const ZoomIndicator = ({ scale }: { scale: number }) => {
+    const pct = scale * 100;
+    const compact = (n: number) => {
+      const abs = Math.abs(n);
+      if (abs >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+      if (abs >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+      if (abs >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+      return `${Math.round(n)}`;
+    };
+    let pctStr: string;
+    if (!isFinite(pct) || pct <= 0) {
+      pctStr = '0%';
+    } else if (pct >= 10000) {
+      pctStr = `${(pct / 1000).toFixed(1)}k%`;
+    } else if (pct >= 100) {
+      pctStr = `${Math.round(pct)}%`;
+    } else if (pct >= 1) {
+      pctStr = `${pct.toFixed(1)}%`;
+    } else if (pct >= 0.1) {
+      pctStr = `${pct.toFixed(2)}%`;
+    } else if (pct >= 0.001) {
+      pctStr = `${pct.toFixed(4)}%`;
+    } else {
+      pctStr = '<0.001%';
+    }
+
+    let ratio = '';
+    let showRatioInline = false;
+    if (scale > 0 && isFinite(scale)) {
+      if (scale >= 1) {
+        ratio = `${compact(scale)}:1`;
+      } else {
+        const inv = 1 / scale;
+        ratio = `1:${compact(inv)}`;
+  showRatioInline = pct < 0.1;
+      }
+    }
+
+    return (
+      <div className="flex flex-col items-center gap-1 p-2 rounded-lg bg-white/70 dark:bg-slate-700/60 text-xs w-full">
+        <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-300">Zoom</span>
+        <span className="font-semibold text-slate-800 dark:text-slate-100" title={`Scale ${scale} (${ratio})`}>{pctStr}</span>
+        {showRatioInline && (
+          <span className="text-[10px] text-slate-500 dark:text-slate-300" aria-hidden>{ratio}</span>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="font-sans" style={{ background: theme === 'dark' ? '#1a202c' : '#ffffff' }}>
       <div className="absolute top-1/2 -translate-y-1/2 left-4 z-10 flex flex-col items-center gap-4 p-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 shadow-2xl w-16">
@@ -334,6 +441,8 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           <ToolButton name="pan"><HandIcon /></ToolButton>
         </div>
         <hr className="w-full border-slate-300 dark:border-slate-600" />
+  <ZoomIndicator scale={stage.scale} />
+  <hr className="w-full border-slate-300 dark:border-slate-600" />
         <ColorPicker color={color} onChange={setColor} />
         <div className="flex flex-col items-center justify-center gap-2 w-full h-32">
           <label htmlFor="stroke-width" className="text-xs text-slate-500 dark:text-slate-400 mb-1">Width</label>
