@@ -1,12 +1,13 @@
 'use client';
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Stage, Layer, Line, Shape } from 'react-konva';
 import { useChannel, useAbly } from 'ably/react';
 import Konva from 'konva';
 import { throttle } from 'lodash';
 import { useTheme } from 'next-themes';
-import { animate } from 'framer-motion';
+import { animate, motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
 import { HexColorPicker } from 'react-colorful';
 
@@ -50,20 +51,114 @@ const MoonIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height
 const HomeIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>;
 const TrashIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></svg>;
 
-const ColorPicker = ({ color, onChange }: { color: string, onChange: (newColor: string) => void }) => {
-  const popover = useRef<HTMLDivElement>(null);
-  const [isOpen, toggle] = useState(false);
-  const close = useCallback(() => toggle(false), []);
-  useClickOutside(popover, close);
+const ColorPicker = ({ color, onChange }: { color: string; onChange: (newColor: string) => void }) => {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [isOpen, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+
+  const positionPopover = useCallback(() => {
+    const trigger = triggerRef.current;
+    const content = contentRef.current;
+    if (!trigger || !content) return;
+    const rect = trigger.getBoundingClientRect();
+    const cRect = content.getBoundingClientRect();
+    const margin = 8;
+
+    let left = rect.right + margin;
+    let top = rect.top + rect.height / 2 - cRect.height / 2;
+
+    if (left + cRect.width > window.innerWidth - margin) {
+      left = clamp(rect.left + rect.width / 2 - cRect.width / 2, margin, window.innerWidth - cRect.width - margin);
+      top = rect.top - cRect.height - margin;
+
+      if (top < margin) {
+        top = rect.bottom + margin;
+      }
+    }
+
+    top = clamp(top, margin, window.innerHeight - cRect.height - margin);
+    left = clamp(left, margin, window.innerWidth - cRect.width - margin);
+
+    setPos({ top, left });
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onDown = (e: MouseEvent | TouchEvent) => {
+      const t = e.target as Node | null;
+      if (!t) return;
+      if (contentRef.current?.contains(t)) return;
+      if (triggerRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    const onResize = () => positionPopover();
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('touchstart', onDown, { passive: true } as AddEventListenerOptions);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onResize);
+    window.addEventListener('scroll', onResize, true);
+    requestAnimationFrame(() => positionPopover());
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('touchstart', onDown as any);
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('scroll', onResize, true);
+    };
+  }, [isOpen, positionPopover]);
 
   return (
-    <div className="relative">
-      <button onClick={() => toggle(true)} className="w-10 h-10 rounded-lg border-2 border-slate-200 dark:border-slate-700" style={{ backgroundColor: color }} title="Select Color" />
-      {isOpen && (
-        <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 p-2 bg-white dark:bg-slate-800 rounded-xl shadow-2xl" ref={popover}>
-          <HexColorPicker color={color} onChange={onChange} />
-        </div>
-      )}
+    <div>
+      <button
+        ref={triggerRef}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          setOpen((prev) => !prev);
+        }}
+        className="w-10 h-10 rounded-lg border-2 border-slate-200 dark:border-slate-700 transition-transform active:scale-95"
+        style={{ backgroundColor: color }}
+        title="Select Color"
+        aria-haspopup="dialog"
+        aria-expanded={isOpen}
+      />
+
+      {typeof window !== 'undefined' &&
+        createPortal(
+          <AnimatePresence>
+            {isOpen && (
+              <motion.div
+                ref={contentRef}
+                initial={{ opacity: 0, scale: 0.96 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.96 }}
+                transition={{ duration: 0.14, ease: 'easeOut' }}
+                style={{
+                  position: 'fixed',
+                  top: pos?.top ?? -9999,
+                  left: pos?.left ?? -9999,
+                  zIndex: 9999,
+                  opacity: pos ? undefined : 0,
+                  pointerEvents: pos ? 'auto' : 'none',
+                }}
+                className="p-2 bg-white dark:bg-slate-800 rounded-xl shadow-2xl border border-slate-200/60 dark:border-slate-700/60"
+                onWheel={(e) => e.stopPropagation()}
+                onMouseDown={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
+                role="dialog"
+                aria-label="Color picker"
+              >
+                <HexColorPicker color={color} onChange={onChange} />
+              </motion.div>
+            )}
+          </AnimatePresence>,
+          document.body
+        )}
     </div>
   );
 };
@@ -407,7 +502,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     } else if (pct >= 0.1) {
       pctStr = `${pct.toFixed(2)}%`;
     } else if (pct >= 0.001) {
-      pctStr = `${pct.toFixed(4)}%`;
+      pctStr = `${pct.toFixed(3)}%`;
     } else {
       pctStr = '<0.001%';
     }
@@ -426,10 +521,15 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
     return (
       <div className="flex flex-col items-center gap-1 p-2 rounded-lg bg-white/70 dark:bg-slate-700/60 text-xs w-full">
-        <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-300">Zoom</span>
-        <span className="font-semibold text-slate-800 dark:text-slate-100" title={`Scale ${scale} (${ratio})`}>{pctStr}</span>
+        <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-300 select-none">Zoom</span>
+        <span
+          className="font-semibold text-slate-800 dark:text-slate-100 text-[11px] leading-tight tracking-tight tabular-nums whitespace-nowrap select-none"
+          title={`Scale ${scale} (${ratio})`}
+        >
+          {pctStr}
+        </span>
         {showRatioInline && (
-          <span className="text-[10px] text-slate-500 dark:text-slate-300" aria-hidden>{ratio}</span>
+          <span className="text-[10px] text-slate-500 dark:text-slate-300 tabular-nums leading-none select-none" aria-hidden>{ratio}</span>
         )}
       </div>
     );
@@ -437,7 +537,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
   return (
     <div className="font-sans" style={{ background: theme === 'dark' ? '#1a202c' : '#ffffff' }}>
-      <div className="absolute top-1/2 -translate-y-1/2 left-4 z-10 flex flex-col items-center gap-4 p-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 shadow-2xl w-16">
+  <div className="absolute top-1/2 -translate-y-1/2 left-4 z-10 flex flex-col items-center gap-4 p-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 shadow-2xl w-16 select-none">
         <div className="flex flex-col gap-1">
           <ToolButton name="pen"><PencilIcon /></ToolButton>
           <ToolButton name="eraser"><EraserIcon /></ToolButton>
