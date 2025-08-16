@@ -17,6 +17,12 @@ interface LineData {
   color: string;
   strokeWidth: number;
   tool: 'pen' | 'eraser';
+  authorId: string;
+}
+
+interface StackEntry {
+  line: LineData;
+  index: number;
 }
 
 interface StageState {
@@ -25,23 +31,7 @@ interface StageState {
   y: number;
 }
 
-const useClickOutside = (
-  ref: React.RefObject<HTMLElement | null>,
-  handler: () => void
-) => {
-  useEffect(() => {
-    const listener = (event: MouseEvent | TouchEvent) => {
-      if (!ref.current || ref.current.contains(event.target as Node)) return;
-      handler();
-    };
-    document.addEventListener('mousedown', listener);
-    document.addEventListener('touchstart', listener);
-    return () => {
-      document.removeEventListener('mousedown', listener);
-      document.removeEventListener('touchstart', listener);
-    };
-  }, [ref, handler]);
-};
+ 
 
 const PencilIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>;
 const EraserIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21H7Z" /><path d="M22 21H7" /><path d="m5 12 5 5" /></svg>;
@@ -99,14 +89,14 @@ const ColorPicker = ({ color, onChange }: { color: string; onChange: (newColor: 
     };
     const onResize = () => positionPopover();
     window.addEventListener('mousedown', onDown);
-    window.addEventListener('touchstart', onDown, { passive: true } as AddEventListenerOptions);
+  window.addEventListener('touchstart', onDown, { passive: true } as AddEventListenerOptions);
     window.addEventListener('keydown', onKey);
     window.addEventListener('resize', onResize);
     window.addEventListener('scroll', onResize, true);
     requestAnimationFrame(() => positionPopover());
     return () => {
       window.removeEventListener('mousedown', onDown);
-      window.removeEventListener('touchstart', onDown as any);
+  window.removeEventListener('touchstart', onDown as unknown as EventListener);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('resize', onResize);
       window.removeEventListener('scroll', onResize, true);
@@ -262,6 +252,8 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const [color, setColor] = useState('#000000');
   const [strokeWidth, setStrokeWidth] = useState(5);
   const [isGridVisible, setGridVisible] = useState(true);
+  const [myUndoStack, setMyUndoStack] = useState<StackEntry[]>([]);
+  const [myRedoStack, setMyRedoStack] = useState<StackEntry[]>([]);
   
   const isDrawing = useRef(false);
   const stageRef = useRef<Konva.Stage>(null);
@@ -271,6 +263,19 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const ably = useAbly();
   const { theme, setTheme } = useTheme();
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const linesRef = useRef<LineData[]>([]);
+  const currentLineIdRef = useRef<string | null>(null);
+  const undoRef = useRef<StackEntry[]>([]);
+  const redoRef = useRef<StackEntry[]>([]);
+  const undoRedoBusyRef = useRef(false);
+
+  useEffect(() => {
+    linesRef.current = lines;
+  }, [lines]);
+  useEffect(() => {
+    undoRef.current = myUndoStack;
+    redoRef.current = myRedoStack;
+  }, [myUndoStack, myRedoStack]);
 
   useEffect(() => {
     const updateDimensions = () => {
@@ -283,7 +288,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
   useEffect(() => {
     zoomTargetRef.current = stage;
-  }, []);
+  }, [stage]);
 
   const ensureZoomRAF = useCallback(() => {
     if (rafRef.current != null) return;
@@ -333,11 +338,39 @@ const Canvas = ({ roomId }: { roomId: string }) => {
       ensureZoomRAF();
     } else if (message.name === 'clear-canvas') {
       setLines([]);
+      setMyUndoStack([]);
+      setMyRedoStack([]);
     } else if (message.name === 'request-state') {
       channel.publish('sync-state', { lines, stage });
     } else if (message.name === 'sync-state') {
       setLines(message.data.lines);
       setStage(message.data.stage);
+  setMyUndoStack([]);
+  setMyRedoStack([]);
+  } else if (message.name === 'delete-line') {
+      const id: string = message.data.id;
+      setLines((prev) => {
+        const target = prev.find((l) => l.id === id);
+        if (target && target.authorId === message.clientId) {
+          return prev.filter((l) => l.id !== id);
+        }
+        return prev;
+      });
+    } else if (message.name === 'restore-line') {
+      const payload = message.data;
+      const line: LineData = payload.line ?? payload;
+      const index: number | undefined = payload.index;
+      if (line.authorId !== message.clientId) return;
+      setLines((prev) => {
+        const without = prev.filter((l) => l.id !== line.id);
+        if (typeof index === 'number') {
+          const idx = Math.max(0, Math.min(index, without.length));
+          const arr = [...without];
+          arr.splice(idx, 0, line);
+          return arr;
+        }
+        return [...without, line];
+      });
     }
   });
 
@@ -369,10 +402,11 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     isDrawing.current = true;
     const pos = getPointerPosition();
     if (!pos) return;
-    const lineId = `${ably.auth.clientId}-${Date.now()}`;
-    const newLine: LineData = { id: lineId, points: [pos.x, pos.y], color, strokeWidth, tool };
+  const lineId = `${ably.auth.clientId}-${Date.now()}`;
+  const newLine: LineData = { id: lineId, points: [pos.x, pos.y], color, strokeWidth, tool, authorId: ably.auth.clientId as string };
     setLines((prev) => [...prev, newLine]);
     channel.publish('new-line', newLine);
+  currentLineIdRef.current = lineId;
   };
 
   const handleMouseMove = () => {
@@ -393,6 +427,15 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
   const handleMouseUp = () => {
     isDrawing.current = false;
+    const currentId = currentLineIdRef.current;
+    if (!currentId) return;
+    const idx = linesRef.current.findIndex((l) => l.id === currentId);
+    const latestLine = idx >= 0 ? linesRef.current[idx] : undefined;
+  if (latestLine && latestLine.authorId === (ably.auth.clientId as string)) {
+      setMyUndoStack((prev) => [...prev, { line: latestLine, index: idx }]);
+      setMyRedoStack([]);
+    }
+    currentLineIdRef.current = null;
   };
 
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
@@ -433,11 +476,66 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     publishStageUpdate(next);
   }, 50);
 
+  const undo = useCallback(() => {
+    if (undoRedoBusyRef.current) return;
+    const last = undoRef.current[undoRef.current.length - 1];
+    if (!last) return;
+    undoRedoBusyRef.current = true;
+    const { line } = last;
+    setLines((prev) => prev.filter((l) => l.id !== line.id));
+    channel.publish('delete-line', { id: line.id });
+    setMyUndoStack((prev) => prev.slice(0, -1));
+    setMyRedoStack((prev) => [...prev, last]);
+    undoRedoBusyRef.current = false;
+  }, [channel]);
+
+  const redo = useCallback(() => {
+    if (undoRedoBusyRef.current) return;
+    const last = redoRef.current[redoRef.current.length - 1];
+    if (!last) return;
+    undoRedoBusyRef.current = true;
+    const { line, index } = last;
+    setLines((prev) => {
+      const without = prev.filter((l) => l.id !== line.id);
+      const idx = Math.max(0, Math.min(index, without.length));
+      const arr = [...without];
+      arr.splice(idx, 0, line);
+      return arr;
+    });
+    channel.publish('restore-line', last);
+    setMyRedoStack((prev) => prev.slice(0, -1));
+    setMyUndoStack((prev) => [...prev, last]);
+    undoRedoBusyRef.current = false;
+  }, [channel]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const isCtrl = e.ctrlKey || e.metaKey;
+      if (!isCtrl) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          redo();
+        } else {
+          undo();
+        }
+      } else if (key === 'y') {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [undo, redo]);
+
 
   const handleClearCanvas = () => {
     if (window.confirm('Are you sure you want to clear the entire canvas for everyone?')) {
       setLines([]);
       channel.publish('clear-canvas', {});
+  setMyUndoStack([]);
+  setMyRedoStack([]);
     }
   };
 
@@ -479,6 +577,41 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     <button onClick={() => setTool(name)} title={name.charAt(0).toUpperCase() + name.slice(1)} className={clsx('p-3 rounded-lg', { 'bg-blue-500 text-white': tool === name, 'hover:bg-slate-200 dark:hover:bg-slate-700': tool !== name })}>
       {children}
     </button>
+  );
+
+  const UndoIcon = () => (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="feather feather-rotate-ccw"
+    >
+      <polyline points="1 4 1 10 7 10" />
+      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+    </svg>
+  );
+  const RedoIcon = () => (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="feather feather-rotate-cw"
+    >
+      <polyline points="23 4 23 10 17 10" />
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+    </svg>
   );
 
   const ZoomIndicator = ({ scale }: { scale: number }) => {
@@ -557,6 +690,12 @@ const Canvas = ({ roomId }: { roomId: string }) => {
         <div className="flex flex-col gap-1">
           <button onClick={() => setGridVisible(!isGridVisible)} title="Toggle Grid" className="p-3 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
             <GridIcon />
+          </button>
+          <button onClick={undo} disabled={myUndoStack.length === 0} title="Undo (Ctrl+Z)" className={clsx('p-3 rounded-lg', myUndoStack.length === 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-slate-200 dark:hover:bg-slate-700')}>
+            <UndoIcon />
+          </button>
+          <button onClick={redo} disabled={myRedoStack.length === 0} title="Redo (Ctrl+Y / Ctrl+Shift+Z)" className={clsx('p-3 rounded-lg', myRedoStack.length === 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-slate-200 dark:hover:bg-slate-700')}>
+            <RedoIcon />
           </button>
           <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Toggle Theme" className="p-3 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
             {theme === 'dark' ? <SunIcon /> : <MoonIcon />}

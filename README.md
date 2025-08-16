@@ -9,6 +9,7 @@ MeshInk is a real-time, collaborative whiteboard application featuring an infini
 - **Session Sync:** Join a session at any time and see the complete drawing history from the start.
 - **Easy Sharing:** Instantly copy a shareable link or room code to invite others.
 - **Drawing Tools:** Switch between a pen and an eraser, with adjustable stroke widths and a full-color picker.
+- **Undo/Redo:** Undo and redo your own strokes, synced in real time across all peers. Use Ctrl+Z to undo and Ctrl+Y or Ctrl+Shift+Z to redo.
 - **Dynamic Grid:** Toggle a dynamic grid to help with alignment and perspective.
 - **Customization:** Switch between light and dark themes to suit your preference.
 - **Session Control:** A "Clear Canvas" button allows you to reset the drawing board for everyone.
@@ -64,3 +65,10 @@ To get a local copy up and running, follow these simple steps.
     ```
 
     Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+## Shortcuts
+
+- Undo: Ctrl+Z
+- Redo: Ctrl+Y or Ctrl+Shift+Z
+
+Undo/Redo only affects the strokes you created; actions are broadcast so everyone sees the result immediately.
