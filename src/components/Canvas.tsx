@@ -31,7 +31,66 @@ interface StageState {
   y: number;
 }
 
- 
+const AlertTriangleIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>;
+
+interface ClearCanvasModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}
+
+const ClearCanvasModal: React.FC<ClearCanvasModalProps> = ({ isOpen, onClose, onConfirm }) => {
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm"
+          onMouseDown={onClose}
+        >
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            className="relative bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-md m-4 border border-slate-200 dark:border-slate-700"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="p-8 text-center">
+              <div className="w-16 h-16 mx-auto flex items-center justify-center rounded-full bg-red-100 dark:bg-red-900/30">
+                <AlertTriangleIcon />
+              </div>
+              <h2 className="mt-5 text-2xl font-bold text-slate-800 dark:text-white">
+                Clear Canvas
+              </h2>
+              <p className="mt-2 text-slate-500 dark:text-slate-400">
+                Are you sure you want to clear the entire canvas? This action will affect everyone in the room and cannot be undone.
+              </p>
+            </div>
+            <div className="flex justify-end gap-4 p-4 bg-slate-50 dark:bg-slate-800/50 rounded-b-2xl">
+              <button
+                onClick={onClose}
+                className="px-6 py-3 font-semibold text-slate-700 bg-slate-200 rounded-xl hover:bg-slate-300 dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600 focus:outline-none focus:ring-4 focus:ring-slate-300 dark:focus:ring-slate-600 transition-all duration-300"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  onConfirm();
+                  onClose();
+                }}
+                className="px-6 py-3 font-semibold text-white bg-red-500 rounded-xl hover:bg-red-600 focus:outline-none focus:ring-4 focus:ring-red-300 dark:focus:ring-red-800 transition-all duration-300"
+              >
+                Clear Canvas
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+};
 
 const PencilIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>;
 const EraserIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21H7Z" /><path d="M22 21H7" /><path d="m5 12 5 5" /></svg>;
@@ -254,6 +313,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const [isGridVisible, setGridVisible] = useState(true);
   const [myUndoStack, setMyUndoStack] = useState<StackEntry[]>([]);
   const [myRedoStack, setMyRedoStack] = useState<StackEntry[]>([]);
+  const [isClearCanvasModalOpen, setClearCanvasModalOpen] = useState(false);
   
   const isDrawing = useRef(false);
   const stageRef = useRef<Konva.Stage>(null);
@@ -531,12 +591,10 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
 
   const handleClearCanvas = () => {
-    if (window.confirm('Are you sure you want to clear the entire canvas for everyone?')) {
-      setLines([]);
-      channel.publish('clear-canvas', {});
-  setMyUndoStack([]);
-  setMyRedoStack([]);
-    }
+    setLines([]);
+    channel.publish('clear-canvas', {});
+setMyUndoStack([]);
+setMyRedoStack([]);
   };
 
   const handleResetView = () => {
@@ -574,7 +632,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   }, [tool]);
 
   const ToolButton = ({ name, children }: { name: 'pen' | 'pan' | 'eraser', children: React.ReactNode }) => (
-    <button onClick={() => setTool(name)} title={name.charAt(0).toUpperCase() + name.slice(1)} className={clsx('p-3 rounded-lg', { 'bg-blue-500 text-white': tool === name, 'hover:bg-slate-200 dark:hover:bg-slate-700': tool !== name })}>
+    <button onClick={() => setTool(name)} title={name.charAt(0).toUpperCase() + name.slice(1)} className={clsx('p-3 rounded-lg', { 'bg-blue-500 text-white': tool === name, 'hover:bg-slate-200 dark:hover:bg-slate-700': tool !== name }) }>
       {children}
     </button>
   );
@@ -670,6 +728,11 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
   return (
     <div className="font-sans" style={{ background: theme === 'dark' ? '#1a202c' : '#ffffff' }}>
+      <ClearCanvasModal
+        isOpen={isClearCanvasModalOpen}
+        onClose={() => setClearCanvasModalOpen(false)}
+        onConfirm={handleClearCanvas}
+      />
   <div className="absolute top-1/2 -translate-y-1/2 left-4 z-10 flex flex-col items-center gap-4 p-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 shadow-2xl w-16 select-none">
         <div className="flex flex-col gap-1">
           <ToolButton name="pen"><PencilIcon /></ToolButton>
@@ -703,7 +766,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           <button onClick={handleResetView} title="Reset View" className="p-3 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
             <HomeIcon />
           </button>
-          <button onClick={handleClearCanvas} title="Clear Canvas" className="p-3 hover:bg-red-500 hover:text-white rounded-lg">
+          <button onClick={() => setClearCanvasModalOpen(true)} title="Clear Canvas" className="p-3 hover:bg-red-500 hover:text-white rounded-lg">
             <TrashIcon />
           </button>
         </div>
