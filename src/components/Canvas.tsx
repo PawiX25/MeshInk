@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { Stage, Layer, Line, Shape } from 'react-konva';
 import { useChannel, useAbly } from 'ably/react';
 import Konva from 'konva';
-import { throttle } from 'lodash';
+import { throttle, debounce } from 'lodash';
 import { useTheme } from 'next-themes';
 import { animate, motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
@@ -30,6 +30,46 @@ interface StageState {
   x: number;
   y: number;
 }
+
+interface SavePreferenceNotificationProps {
+    onAllow: () => void;
+    onDeny: () => void;
+}
+
+const SavePreferenceNotification = ({ onAllow, onDeny }: SavePreferenceNotificationProps) => {
+    return (
+        <motion.div
+            initial={{ y: 80, opacity: 0, scale: 0.98 }}
+            animate={{ y: 0, opacity: 1, scale: 1 }}
+            exit={{ y: 20, opacity: 0, scale: 0.98, transition: { duration: 0.18, ease: 'easeOut' } }}
+            transition={{ type: 'spring', stiffness: 500, damping: 30, mass: 0.7 }}
+            className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 w-full max-w-lg p-4"
+        >
+            <div className="bg-slate-800 text-white rounded-xl shadow-2xl p-6 border border-slate-700 flex items-center justify-between gap-6">
+                <div className="flex-grow">
+                    <h4 className="font-bold text-lg">Save your work?</h4>
+                    <p className="text-sm text-slate-300 mt-1">
+                        Allow this site to save your canvas in this browser? You won't be asked again.
+                    </p>
+                </div>
+                <div className="flex gap-3 flex-shrink-0">
+                    <button
+                        onClick={onDeny}
+                        className="px-5 py-2.5 font-semibold text-sm bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+                    >
+                        Deny
+                    </button>
+                    <button
+                        onClick={onAllow}
+                        className="px-5 py-2.5 font-semibold text-sm bg-blue-500 hover:bg-blue-600 rounded-lg transition-colors"
+                    >
+                        Allow
+                    </button>
+                </div>
+            </div>
+        </motion.div>
+    );
+};
 
 const AlertTriangleIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>;
 
@@ -314,6 +354,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const [myUndoStack, setMyUndoStack] = useState<StackEntry[]>([]);
   const [myRedoStack, setMyRedoStack] = useState<StackEntry[]>([]);
   const [isClearCanvasModalOpen, setClearCanvasModalOpen] = useState(false);
+  const [savePreference, setSavePreference] = useState<'allow' | 'deny' | 'prompt'>('prompt');
   
   const isDrawing = useRef(false);
   const stageRef = useRef<Konva.Stage>(null);
@@ -435,8 +476,30 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   });
 
   useEffect(() => {
+    const preference = localStorage.getItem('meshink-save-preference');
+    if (preference === 'allow' || preference === 'deny') {
+      setSavePreference(preference);
+    }
+
+    if (preference === 'allow') {
+      const savedLines = localStorage.getItem(`meshink-room-${roomId}`);
+      if (savedLines) {
+        try {
+          setLines(JSON.parse(savedLines));
+          return;
+        } catch (e) {
+          console.error("Failed to parse saved lines:", e);
+        }
+      }
+    }
     channel.publish('request-state', {});
-  }, [channel]);
+  }, [channel, roomId]);
+
+  useEffect(() => {
+    if (savePreference === 'allow') {
+      localStorage.setItem(`meshink-room-${roomId}`, JSON.stringify(lines));
+    }
+  }, [lines, roomId, savePreference]);
 
   useEffect(() => {
     if (theme === 'dark' && color === '#000000') {
@@ -592,9 +655,10 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
   const handleClearCanvas = () => {
     setLines([]);
+    localStorage.removeItem(`meshink-room-${roomId}`);
     channel.publish('clear-canvas', {});
-setMyUndoStack([]);
-setMyRedoStack([]);
+    setMyUndoStack([]);
+    setMyRedoStack([]);
   };
 
   const handleResetView = () => {
@@ -630,6 +694,20 @@ setMyRedoStack([]);
       stage.container().style.cursor = cursor;
     }
   }, [tool]);
+
+  const handleSetSavePreference = (preference: 'allow' | 'deny') => {
+    localStorage.setItem('meshink-save-preference', preference);
+    setSavePreference(preference);
+
+    if (preference === 'allow') {
+        const savedRooms = localStorage.getItem('meshink-recent-rooms');
+        const recentRooms = savedRooms ? JSON.parse(savedRooms) : [];
+        if (!recentRooms.includes(roomId)) {
+            recentRooms.unshift(roomId);
+            localStorage.setItem('meshink-recent-rooms', JSON.stringify(recentRooms.slice(0, 10))); // Limit to 10 recent rooms
+        }
+    }
+  };
 
   const ToolButton = ({ name, children }: { name: 'pen' | 'pan' | 'eraser', children: React.ReactNode }) => (
     <button onClick={() => setTool(name)} title={name.charAt(0).toUpperCase() + name.slice(1)} className={clsx('p-3 rounded-lg', { 'bg-blue-500 text-white': tool === name, 'hover:bg-slate-200 dark:hover:bg-slate-700': tool !== name }) }>
@@ -733,6 +811,16 @@ setMyRedoStack([]);
         onClose={() => setClearCanvasModalOpen(false)}
         onConfirm={handleClearCanvas}
       />
+
+      <AnimatePresence>
+        {savePreference === 'prompt' && (
+          <SavePreferenceNotification 
+              onAllow={() => handleSetSavePreference('allow')} 
+              onDeny={() => handleSetSavePreference('deny')}
+          />
+        )}
+      </AnimatePresence>
+
   <div className="absolute top-1/2 -translate-y-1/2 left-4 z-10 flex flex-col items-center gap-4 p-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 shadow-2xl w-16 select-none">
         <div className="flex flex-col gap-1">
           <ToolButton name="pen"><PencilIcon /></ToolButton>
