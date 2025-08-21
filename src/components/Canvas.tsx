@@ -1,11 +1,11 @@
 'use client';
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { Stage, Layer, Line, Shape } from 'react-konva';
 import { useChannel, useAbly } from 'ably/react';
 import Konva from 'konva';
-import { throttle, debounce } from 'lodash';
+import { throttle } from 'lodash';
 import { useTheme } from 'next-themes';
 import { animate, motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
@@ -49,7 +49,7 @@ const SavePreferenceNotification = ({ onAllow, onDeny }: SavePreferenceNotificat
                 <div className="flex-grow">
                     <h4 className="font-bold text-lg">Save your work?</h4>
                     <p className="text-sm text-slate-300 mt-1">
-                        Allow this site to save your canvas in this browser? You won't be asked again.
+                        Allow this site to save your canvas in this browser? You won&apos;t be asked again.
                     </p>
                 </div>
                 <div className="flex gap-3 flex-shrink-0">
@@ -509,8 +509,14 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     }
   }, [theme, color]);
 
-  const publishStageUpdate = useCallback(throttle((s: StageState) => channel.publish('stage-update', s), 100), [channel]);
-  const publishLineUpdate = useCallback(throttle((l: LineData) => channel.publish('update-line', l), 50), [channel]);
+  const publishStageUpdate = useMemo(
+    () => throttle((s: StageState) => channel.publish('stage-update', s), 100),
+    [channel]
+  );
+  const publishLineUpdate = useMemo(
+    () => throttle((l: LineData) => channel.publish('update-line', l), 50),
+    [channel]
+  );
 
   const getPointerPosition = () => {
     const stage = stageRef.current;
