@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { Stage, Layer, Line, Shape } from 'react-konva';
+import { Stage, Layer, Line, Shape, Rect } from 'react-konva';
 import { useChannel, useAbly } from 'ably/react';
 import Konva from 'konva';
 import { throttle } from 'lodash';
@@ -24,6 +24,11 @@ interface StackEntry {
   line: LineData;
   index: number;
 }
+
+interface MoveSnapshot { id: string; points: number[] }
+type UndoAction =
+  | { type: 'add'; line: LineData; index: number }
+  | { type: 'move'; before: MoveSnapshot[]; after: MoveSnapshot[] };
 
 interface StageState {
   scale: number;
@@ -347,12 +352,12 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
   const [lines, setLines] = useState<LineData[]>([]);
   const [stage, setStage] = useState<StageState>({ scale: 1, x: 0, y: 0 });
-  const [tool, setTool] = useState<'pen' | 'pan' | 'eraser'>('pen');
+  const [tool, setTool] = useState<'pen' | 'pan' | 'eraser' | 'select'>('pen');
   const [color, setColor] = useState('#000000');
   const [strokeWidth, setStrokeWidth] = useState(5);
   const [isGridVisible, setGridVisible] = useState(true);
-  const [myUndoStack, setMyUndoStack] = useState<StackEntry[]>([]);
-  const [myRedoStack, setMyRedoStack] = useState<StackEntry[]>([]);
+  const [myUndoStack, setMyUndoStack] = useState<UndoAction[]>([]);
+  const [myRedoStack, setMyRedoStack] = useState<UndoAction[]>([]);
   const [isClearCanvasModalOpen, setClearCanvasModalOpen] = useState(false);
   const [savePreference, setSavePreference] = useState<'allow' | 'deny' | 'prompt'>('prompt');
   
@@ -366,9 +371,17 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const linesRef = useRef<LineData[]>([]);
   const currentLineIdRef = useRef<string | null>(null);
-  const undoRef = useRef<StackEntry[]>([]);
-  const redoRef = useRef<StackEntry[]>([]);
+  const undoRef = useRef<UndoAction[]>([]);
+  const redoRef = useRef<UndoAction[]>([]);
   const undoRedoBusyRef = useRef(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectionBBox, setSelectionBBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [marqueeBox, setMarqueeBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const marqueeRef = useRef<{ start: { x: number; y: number }; current: { x: number; y: number } } | null>(null);
+  const isMarqueeActiveRef = useRef(false);
+  const isSelectionMovingRef = useRef(false);
+  const moveOriginalSnapshotsRef = useRef<MoveSnapshot[] | null>(null);
+  const lastPointerPosRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     linesRef.current = lines;
@@ -526,20 +539,91 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     return stage.getAbsoluteTransform().copy().invert().point(pointer);
   };
 
-  const handleMouseDown = () => {
+  const handleMouseDown = (e?: Konva.KonvaEventObject<MouseEvent>) => {
     if (tool === 'pan') return;
+    if (tool === 'select') {
+      const stageObj = stageRef.current;
+      if (!stageObj) return;
+      const pointer = getPointerPosition();
+      if (!pointer) return;
+      if (selectionBBox && pointer.x >= selectionBBox.x && pointer.x <= selectionBBox.x + selectionBBox.width && pointer.y >= selectionBBox.y && pointer.y <= selectionBBox.y + selectionBBox.height) {
+        if (selectedIds.size > 0) {
+          moveOriginalSnapshotsRef.current = Array.from(selectedIds).map(id => {
+            const line = linesRef.current.find(l => l.id === id)!;
+            return { id, points: [...line.points] };
+          });
+        }
+        isSelectionMovingRef.current = true;
+        lastPointerPosRef.current = pointer;
+        return;
+      }
+  isMarqueeActiveRef.current = true;
+  marqueeRef.current = { start: pointer, current: pointer };
+  setMarqueeBox({ x: pointer.x, y: pointer.y, width: 0, height: 0 });
+      setSelectionBBox(null);
+      setSelectedIds(new Set());
+      return;
+    }
     isDrawing.current = true;
     const pos = getPointerPosition();
     if (!pos) return;
-  const lineId = `${ably.auth.clientId}-${Date.now()}`;
-  const newLine: LineData = { id: lineId, points: [pos.x, pos.y], color, strokeWidth, tool, authorId: ably.auth.clientId as string };
+    const lineId = `${ably.auth.clientId}-${Date.now()}`;
+    const newLine: LineData = { id: lineId, points: [pos.x, pos.y], color, strokeWidth, tool, authorId: ably.auth.clientId as string };
     setLines((prev) => [...prev, newLine]);
     channel.publish('new-line', newLine);
-  currentLineIdRef.current = lineId;
+    currentLineIdRef.current = lineId;
   };
 
   const handleMouseMove = () => {
-    if (tool === 'pan' || !isDrawing.current) return;
+    if (tool === 'pan') return;
+    if (tool === 'select') {
+      const pointer = getPointerPosition();
+      if (!pointer) return;
+      if (isSelectionMovingRef.current && lastPointerPosRef.current) {
+        const last = lastPointerPosRef.current;
+        const dx = pointer.x - last.x;
+        const dy = pointer.y - last.y;
+        if (dx !== 0 || dy !== 0) {
+          lastPointerPosRef.current = pointer;
+          setLines(prev => prev.map(l => {
+            if (!selectedIds.has(l.id)) return l;
+            const newPoints = l.points.map((v, i) => (i % 2 === 0 ? v + dx : v + dy));
+            const updated = { ...l, points: newPoints };
+            publishLineUpdate(updated);
+            return updated;
+          }));
+          if (selectionBBox) {
+            setSelectionBBox({ x: selectionBBox.x + dx, y: selectionBBox.y + dy, width: selectionBBox.width, height: selectionBBox.height });
+          }
+        }
+        const stageObj = stageRef.current;
+        if (stageObj) stageObj.container().style.cursor = 'grabbing';
+        return;
+      }
+      if (isMarqueeActiveRef.current && marqueeRef.current) {
+        marqueeRef.current.current = pointer;
+        const { start, current } = marqueeRef.current;
+        setMarqueeBox({
+          x: Math.min(start.x, current.x),
+          y: Math.min(start.y, current.y),
+          width: Math.abs(start.x - current.x),
+          height: Math.abs(start.y - current.y)
+        });
+        const stageObj = stageRef.current;
+        if (stageObj) stageObj.container().style.cursor = 'crosshair';
+        return;
+      }
+      const stageObj = stageRef.current;
+      if (stageObj) {
+        if (selectionBBox && pointer.x >= selectionBBox.x && pointer.x <= selectionBBox.x + selectionBBox.width && pointer.y >= selectionBBox.y && pointer.y <= selectionBBox.y + selectionBBox.height) {
+          stageObj.container().style.cursor = 'grab';
+        } else {
+          stageObj.container().style.cursor = 'default';
+        }
+      }
+      return;
+    }
+    if (!isDrawing.current) return;
     const pos = getPointerPosition();
     if (!pos) return;
     setLines((prev) => {
@@ -555,13 +639,75 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   };
 
   const handleMouseUp = () => {
+    if (tool === 'select') {
+      if (isSelectionMovingRef.current) {
+        const before = moveOriginalSnapshotsRef.current;
+        if (before && before.length > 0) {
+          const after: MoveSnapshot[] = before.map(s => {
+            const line = linesRef.current.find(l => l.id === s.id)!;
+            return { id: s.id, points: [...line.points] };
+          });
+          const changed = after.some((a, i) => a.points.length !== before[i].points.length || a.points.some((v, idx) => v !== before[i].points[idx]));
+          if (changed) {
+            setMyUndoStack(prev => [...prev, { type: 'move', before, after }]);
+            setMyRedoStack([]);
+          }
+        }
+        moveOriginalSnapshotsRef.current = null;
+        isSelectionMovingRef.current = false;
+        lastPointerPosRef.current = null;
+        return;
+      }
+      if (isMarqueeActiveRef.current) {
+        const data = marqueeRef.current;
+        isMarqueeActiveRef.current = false;
+        if (data) {
+          const { start, current } = data;
+          const x1 = Math.min(start.x, current.x);
+          const y1 = Math.min(start.y, current.y);
+            const x2 = Math.max(start.x, current.x);
+          const y2 = Math.max(start.y, current.y);
+          const newSelected = new Set<string>();
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, maxStroke = 0;
+          linesRef.current.forEach(l => {
+            if (l.authorId !== (ably.auth.clientId as string)) return;
+            for (let i = 0; i < l.points.length; i += 2) {
+              const px = l.points[i];
+              const py = l.points[i+1];
+              if (px >= x1 && px <= x2 && py >= y1 && py <= y2) {
+                newSelected.add(l.id);
+                for (let j = 0; j < l.points.length; j += 2) {
+                  const sx = l.points[j];
+                  const sy = l.points[j+1];
+                  if (sx < minX) minX = sx;
+                  if (sy < minY) minY = sy;
+                  if (sx > maxX) maxX = sx;
+                  if (sy > maxY) maxY = sy;
+                }
+                if (l.strokeWidth > maxStroke) maxStroke = l.strokeWidth;
+                break;
+              }
+            }
+          });
+          setSelectedIds(newSelected);
+          if (newSelected.size > 0 && isFinite(minX)) {
+            const pad = maxStroke / 2 + 4;
+            setSelectionBBox({ x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 });
+          } else setSelectionBBox(null);
+        }
+        marqueeRef.current = null;
+        setMarqueeBox(null);
+        return;
+      }
+      return;
+    }
     isDrawing.current = false;
     const currentId = currentLineIdRef.current;
     if (!currentId) return;
     const idx = linesRef.current.findIndex((l) => l.id === currentId);
     const latestLine = idx >= 0 ? linesRef.current[idx] : undefined;
-  if (latestLine && latestLine.authorId === (ably.auth.clientId as string)) {
-      setMyUndoStack((prev) => [...prev, { line: latestLine, index: idx }]);
+    if (latestLine && latestLine.authorId === (ably.auth.clientId as string)) {
+      setMyUndoStack((prev) => [...prev, { type: 'add', line: latestLine, index: idx }]);
       setMyRedoStack([]);
     }
     currentLineIdRef.current = null;
@@ -610,11 +756,18 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     const last = undoRef.current[undoRef.current.length - 1];
     if (!last) return;
     undoRedoBusyRef.current = true;
-    const { line } = last;
-    setLines((prev) => prev.filter((l) => l.id !== line.id));
-    channel.publish('delete-line', { id: line.id });
-    setMyUndoStack((prev) => prev.slice(0, -1));
-    setMyRedoStack((prev) => [...prev, last]);
+    if (last.type === 'add') {
+      setLines(prev => prev.filter(l => l.id !== last.line.id));
+      channel.publish('delete-line', { id: last.line.id });
+    } else if (last.type === 'move') {
+      setLines(prev => prev.map(l => {
+        const snap = last.before.find(s => s.id === l.id);
+        return snap ? { ...l, points: snap.points } : l;
+      }));
+      last.before.forEach(snap => channel.publish('update-line', { ...linesRef.current.find(l => l.id === snap.id), points: snap.points }));
+    }
+    setMyUndoStack(prev => prev.slice(0, -1));
+    setMyRedoStack(prev => [...prev, last]);
     undoRedoBusyRef.current = false;
   }, [channel]);
 
@@ -623,17 +776,25 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     const last = redoRef.current[redoRef.current.length - 1];
     if (!last) return;
     undoRedoBusyRef.current = true;
-    const { line, index } = last;
-    setLines((prev) => {
-      const without = prev.filter((l) => l.id !== line.id);
-      const idx = Math.max(0, Math.min(index, without.length));
-      const arr = [...without];
-      arr.splice(idx, 0, line);
-      return arr;
-    });
-    channel.publish('restore-line', last);
-    setMyRedoStack((prev) => prev.slice(0, -1));
-    setMyUndoStack((prev) => [...prev, last]);
+    if (last.type === 'add') {
+      const { line, index } = last;
+      setLines(prev => {
+        const without = prev.filter(l => l.id !== line.id);
+        const idx = Math.max(0, Math.min(index, without.length));
+        const arr = [...without];
+        arr.splice(idx, 0, line);
+        return arr;
+      });
+      channel.publish('restore-line', { line: last.line, index: last.index });
+    } else if (last.type === 'move') {
+      setLines(prev => prev.map(l => {
+        const snap = last.after.find(s => s.id === l.id);
+        return snap ? { ...l, points: snap.points } : l;
+      }));
+      last.after.forEach(snap => channel.publish('update-line', { ...linesRef.current.find(l => l.id === snap.id), points: snap.points }));
+    }
+    setMyRedoStack(prev => prev.slice(0, -1));
+    setMyUndoStack(prev => [...prev, last]);
     undoRedoBusyRef.current = false;
   }, [channel]);
 
@@ -660,11 +821,11 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
 
   const handleClearCanvas = () => {
-    setLines([]);
-    localStorage.removeItem(`meshink-room-${roomId}`);
-    channel.publish('clear-canvas', {});
-    setMyUndoStack([]);
-    setMyRedoStack([]);
+  setLines([]);
+  localStorage.removeItem(`meshink-room-${roomId}`);
+  channel.publish('clear-canvas', {});
+  setMyUndoStack([]);
+  setMyRedoStack([]);
   };
 
   const handleResetView = () => {
@@ -696,8 +857,14 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     isDrawing.current = false;
     const stage = stageRef.current;
     if (stage) {
-      const cursor = { pen: 'crosshair', pan: 'grab', eraser: 'cell' }[tool];
+      const cursor = { pen: 'crosshair', pan: 'grab', eraser: 'cell', select: 'default' }[tool];
       stage.container().style.cursor = cursor;
+    }
+    if (tool !== 'select') {
+      setSelectedIds(new Set());
+      setSelectionBBox(null);
+      marqueeRef.current = null;
+      setMarqueeBox(null);
     }
   }, [tool]);
 
@@ -715,11 +882,50 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     }
   };
 
-  const ToolButton = ({ name, children }: { name: 'pen' | 'pan' | 'eraser', children: React.ReactNode }) => (
+  const ToolButton = ({ name, children }: { name: 'pen' | 'pan' | 'eraser' | 'select', children: React.ReactNode }) => (
     <button onClick={() => setTool(name)} title={name.charAt(0).toUpperCase() + name.slice(1)} className={clsx('p-3 rounded-lg', { 'bg-blue-500 text-white': tool === name, 'hover:bg-slate-200 dark:hover:bg-slate-700': tool !== name }) }>
       {children}
     </button>
   );
+
+const SelectIcon = ({
+  active,
+  mode,
+}: {
+  active: boolean;
+  mode: 'light' | 'dark' | undefined;
+}) => {
+  const accent = mode === 'dark' ? '#60a5fa' : '#2563eb';
+  const stroke = 'currentColor';
+  const innerFill = active
+    ? mode === 'dark'
+      ? '#ffffff22'
+      : '#00000018'
+    : 'none';
+
+  const x = 3;
+  const y = 3;
+  const size = 18;
+  const r = 3;
+
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none">
+      <rect x={x} y={y} width={size} height={size} rx={r} ry={r} stroke={stroke} strokeWidth={2} strokeDasharray="3 3" strokeLinecap="round" strokeLinejoin="round" pathLength={72} />
+      <rect x={8.5} y={8.5} width={7} height={7} fill={innerFill} stroke={active ? accent : 'none'} strokeWidth={active ? 1 : 0} />
+      {active && (
+        <g fill={accent}>
+          <circle cx={x} cy={y} r={2.7} />
+          <circle cx={x + size} cy={y} r={2.7} />
+          <circle cx={x} cy={y + size} r={2.7} />
+          <circle cx={x + size} cy={y + size} r={2.7} />
+        </g>
+      )}
+    </svg>
+  );
+};
+
+
+  
 
   const UndoIcon = () => (
     <svg
@@ -832,6 +1038,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           <ToolButton name="pen"><PencilIcon /></ToolButton>
           <ToolButton name="eraser"><EraserIcon /></ToolButton>
           <ToolButton name="pan"><HandIcon /></ToolButton>
+          <ToolButton name="select"><SelectIcon active={tool === 'select'} mode={theme as any} /></ToolButton>
         </div>
         <hr className="w-full border-slate-300 dark:border-slate-600" />
   <ZoomIndicator scale={stage.scale} />
@@ -895,8 +1102,66 @@ const Canvas = ({ roomId }: { roomId: string }) => {
               perfectDrawEnabled={false}
               shadowForStrokeEnabled={false}
               globalCompositeOperation={line.tool === 'eraser' ? 'destination-out' : 'source-over'}
+              onMouseDown={(e) => {
+                if (tool === 'select') {
+                  if (line.authorId !== (ably.auth.clientId as string)) return;
+                  e.cancelBubble = true;
+                  setSelectedIds(new Set([line.id]));
+                  if (line.points.length >= 2) {
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                    for (let i = 0; i < line.points.length; i += 2) {
+                      const px = line.points[i];
+                      const py = line.points[i+1];
+                      if (px < minX) minX = px;
+                      if (py < minY) minY = py;
+                      if (px > maxX) maxX = px;
+                      if (py > maxY) maxY = py;
+                    }
+                    const pad = line.strokeWidth / 2 + 4;
+                    setSelectionBBox({ x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 });
+                  } else {
+                    setSelectionBBox(null);
+                  }
+                  isSelectionMovingRef.current = false;
+                  lastPointerPosRef.current = null;
+                }
+              }}
             />
           ))}
+          {tool === 'select' && selectionBBox && selectedIds.size > 0 && (
+            <Rect
+              x={selectionBBox.x}
+              y={selectionBBox.y}
+              width={selectionBBox.width}
+              height={selectionBBox.height}
+              stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'}
+              strokeWidth={1 / stage.scale}
+              dash={[6 / stage.scale, 4 / stage.scale]}
+              listening={false}
+            />
+          )}
+      {tool === 'select' && marqueeBox && (
+            <>
+              <Rect
+                x={marqueeBox.x}
+                y={marqueeBox.y}
+                width={marqueeBox.width}
+                height={marqueeBox.height}
+                stroke={theme === 'dark' ? '#38bdf8' : '#0ea5e9'}
+                strokeWidth={1 / stage.scale}
+                dash={[4 / stage.scale, 3 / stage.scale]}
+                listening={false}
+              />
+              <Rect
+                x={marqueeBox.x}
+                y={marqueeBox.y}
+                width={marqueeBox.width}
+                height={marqueeBox.height}
+        fill={(theme === 'dark' ? '#38bdf8' : '#0ea5e9') + '33'}
+                listening={false}
+              />
+            </>
+          )}
         </Layer>
       </Stage>
     </div>
