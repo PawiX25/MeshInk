@@ -382,6 +382,8 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const isSelectionMovingRef = useRef(false);
   const moveOriginalSnapshotsRef = useRef<MoveSnapshot[] | null>(null);
   const lastPointerPosRef = useRef<{ x: number; y: number } | null>(null);
+  const isResizingRef = useRef(false);
+  const resizeDataRef = useRef<{ handle: string; originBBox: { x: number; y: number; width: number; height: number }; originSnapshots: MoveSnapshot[] } | null>(null);
 
   useEffect(() => {
     linesRef.current = lines;
@@ -546,6 +548,13 @@ const Canvas = ({ roomId }: { roomId: string }) => {
       if (!stageObj) return;
       const pointer = getPointerPosition();
       if (!pointer) return;
+      if (selectionBBox && selectedIds.size > 0) {
+        const h = getHandleUnderPointer(pointer);
+        if (h) {
+          startResize(h);
+          return;
+        }
+      }
       if (selectionBBox && pointer.x >= selectionBBox.x && pointer.x <= selectionBBox.x + selectionBBox.width && pointer.y >= selectionBBox.y && pointer.y <= selectionBBox.y + selectionBBox.height) {
         if (selectedIds.size > 0) {
           moveOriginalSnapshotsRef.current = Array.from(selectedIds).map(id => {
@@ -579,6 +588,71 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     if (tool === 'select') {
       const pointer = getPointerPosition();
       if (!pointer) return;
+      if (isResizingRef.current && resizeDataRef.current) {
+        const { handle, originBBox, originSnapshots } = resizeDataRef.current;
+        let x1 = originBBox.x;
+        let y1 = originBBox.y;
+        let x2 = originBBox.x + originBBox.width;
+        let y2 = originBBox.y + originBBox.height;
+        if (handle.includes('w')) x1 = pointer.x;
+        if (handle.includes('e')) x2 = pointer.x;
+        if (handle.includes('n')) y1 = pointer.y;
+        if (handle.includes('s')) y2 = pointer.y;
+        if (x2 - x1 === 0 || y2 - y1 === 0) return;
+        const minW = 1e-6;
+        const minH = 1e-6;
+        if (x2 < x1) [x1, x2] = [x2, x1];
+        if (y2 < y1) [y1, y2] = [y2, y1];
+        if (x2 - x1 < minW || y2 - y1 < minH) return;
+        const scaleX = (x2 - x1) / originBBox.width;
+        const scaleY = (y2 - y1) / originBBox.height;
+        let anchorX: number;
+        let anchorY: number;
+        if (handle.includes('w')) anchorX = originBBox.x + originBBox.width; else if (handle.includes('e')) anchorX = originBBox.x; else anchorX = originBBox.x + originBBox.width / 2;
+        if (handle.includes('n')) anchorY = originBBox.y + originBBox.height; else if (handle.includes('s')) anchorY = originBBox.y; else anchorY = originBBox.y + originBBox.height / 2;
+        const updatedLines: Record<string, number[]> = {};
+        originSnapshots.forEach(s => {
+          const line = linesRef.current.find(l => l.id === s.id);
+            if (!line) return;
+            const newPoints: number[] = [];
+            for (let i = 0; i < s.points.length; i += 2) {
+              const ox = s.points[i];
+              const oy = s.points[i + 1];
+              const nx = anchorX + (ox - anchorX) * scaleX;
+              const ny = anchorY + (oy - anchorY) * scaleY;
+              newPoints.push(nx, ny);
+            }
+            updatedLines[s.id] = newPoints;
+        });
+        setLines(prev => prev.map(l => {
+          if (!selectedIds.has(l.id)) return l;
+          const pts = updatedLines[l.id];
+          if (!pts) return l;
+          const upd = { ...l, points: pts };
+          publishLineUpdate(upd);
+          return upd;
+        }));
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, maxStroke = 0;
+        linesRef.current.forEach(l => {
+          if (!selectedIds.has(l.id)) return;
+          for (let i = 0; i < l.points.length; i += 2) {
+            const px = l.points[i];
+            const py = l.points[i + 1];
+            if (px < minX) minX = px;
+            if (py < minY) minY = py;
+            if (px > maxX) maxX = px;
+            if (py > maxY) maxY = py;
+          }
+          if (l.strokeWidth > maxStroke) maxStroke = l.strokeWidth;
+        });
+        if (isFinite(minX)) {
+          const pad = maxStroke / 2 + 4;
+          setSelectionBBox({ x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 });
+        }
+        const stageObj = stageRef.current;
+        if (stageObj) stageObj.container().style.cursor = getResizeCursor(handle);
+        return;
+      }
       if (isSelectionMovingRef.current && lastPointerPosRef.current) {
         const last = lastPointerPosRef.current;
         const dx = pointer.x - last.x;
@@ -615,6 +689,13 @@ const Canvas = ({ roomId }: { roomId: string }) => {
       }
       const stageObj = stageRef.current;
       if (stageObj) {
+        if (selectionBBox && selectedIds.size > 0) {
+          const h = getHandleUnderPointer(pointer);
+          if (h) {
+            stageObj.container().style.cursor = getResizeCursor(h);
+            return;
+          }
+        }
         if (selectionBBox && pointer.x >= selectionBBox.x && pointer.x <= selectionBBox.x + selectionBBox.width && pointer.y >= selectionBBox.y && pointer.y <= selectionBBox.y + selectionBBox.height) {
           stageObj.container().style.cursor = 'grab';
         } else {
@@ -640,6 +721,21 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
   const handleMouseUp = () => {
     if (tool === 'select') {
+      if (isResizingRef.current && resizeDataRef.current) {
+        const before = resizeDataRef.current.originSnapshots;
+        const after: MoveSnapshot[] = before.map(s => {
+          const line = linesRef.current.find(l => l.id === s.id)!;
+          return { id: s.id, points: [...line.points] };
+        });
+        const changed = after.some((a, i) => a.points.length !== before[i].points.length || a.points.some((v, idx) => v !== before[i].points[idx]));
+        if (changed) {
+          setMyUndoStack(prev => [...prev, { type: 'move', before, after }]);
+          setMyRedoStack([]);
+        }
+        isResizingRef.current = false;
+        resizeDataRef.current = null;
+        return;
+      }
       if (isSelectionMovingRef.current) {
         const before = moveOriginalSnapshotsRef.current;
         if (before && before.length > 0) {
@@ -865,8 +961,58 @@ const Canvas = ({ roomId }: { roomId: string }) => {
       setSelectionBBox(null);
       marqueeRef.current = null;
       setMarqueeBox(null);
+      isResizingRef.current = false;
+      resizeDataRef.current = null;
     }
   }, [tool]);
+
+  const getHandleUnderPointer = (p: { x: number; y: number }) => {
+    if (!selectionBBox) return null;
+    const sizeScreen = 14;
+    const world = sizeScreen / stage.scale;
+    const half = world / 2;
+    const x1 = selectionBBox.x;
+    const y1 = selectionBBox.y;
+    const x2 = x1 + selectionBBox.width;
+    const y2 = y1 + selectionBBox.height;
+    const xc = (x1 + x2) / 2;
+    const yc = (y1 + y2) / 2;
+    const handles: { h: string; x: number; y: number }[] = [
+      { h: 'nw', x: x1, y: y1 },
+      { h: 'n', x: xc, y: y1 },
+      { h: 'ne', x: x2, y: y1 },
+      { h: 'w', x: x1, y: yc },
+      { h: 'e', x: x2, y: yc },
+      { h: 'sw', x: x1, y: y2 },
+      { h: 's', x: xc, y: y2 },
+      { h: 'se', x: x2, y: y2 },
+    ];
+    for (const hd of handles) {
+      if (Math.abs(p.x - hd.x) <= half && Math.abs(p.y - hd.y) <= half) return hd.h;
+    }
+    return null;
+  };
+
+  const getResizeCursor = (h: string) => {
+    if (h === 'nw' || h === 'se') return 'nwse-resize';
+    if (h === 'ne' || h === 'sw') return 'nesw-resize';
+    if (h === 'n' || h === 's') return 'ns-resize';
+    if (h === 'e' || h === 'w') return 'ew-resize';
+    return 'default';
+  };
+
+  const startResize = (handle: string) => {
+    if (!selectionBBox) return;
+    const originSnapshots: MoveSnapshot[] = Array.from(selectedIds).map(id => {
+      const line = linesRef.current.find(l => l.id === id)!;
+      return { id, points: [...line.points] };
+    });
+    if (originSnapshots.length === 0) return;
+    isResizingRef.current = true;
+    resizeDataRef.current = { handle, originBBox: { ...selectionBBox }, originSnapshots };
+    const stageObj = stageRef.current;
+    if (stageObj) stageObj.container().style.cursor = getResizeCursor(handle);
+  };
 
   const handleSetSavePreference = (preference: 'allow' | 'deny') => {
     localStorage.setItem('meshink-save-preference', preference);
@@ -1139,6 +1285,45 @@ const SelectIcon = ({
               dash={[6 / stage.scale, 4 / stage.scale]}
               listening={false}
             />
+          )}
+          {tool === 'select' && selectionBBox && selectedIds.size > 0 && (
+            <>
+              {(() => {
+                const sizeScreen = 14;
+                const w = sizeScreen / stage.scale;
+                const half = w / 2;
+                const sb = selectionBBox;
+                const x1 = sb.x;
+                const y1 = sb.y;
+                const x2 = sb.x + sb.width;
+                const y2 = sb.y + sb.height;
+                const xc = (x1 + x2) / 2;
+                const yc = (y1 + y2) / 2;
+                const data: { h: string; x: number; y: number }[] = [
+                  { h: 'nw', x: x1, y: y1 },
+                  { h: 'n', x: xc, y: y1 },
+                  { h: 'ne', x: x2, y: y1 },
+                  { h: 'w', x: x1, y: yc },
+                  { h: 'e', x: x2, y: yc },
+                  { h: 'sw', x: x1, y: y2 },
+                  { h: 's', x: xc, y: y2 },
+                  { h: 'se', x: x2, y: y2 },
+                ];
+                return data.map(d => (
+                  <Rect
+                    key={d.h}
+                    x={d.x - half}
+                    y={d.y - half}
+                    width={w}
+                    height={w}
+                    fill={theme === 'dark' ? '#1e293b' : '#f1f5f9'}
+                    stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'}
+                    strokeWidth={1 / stage.scale}
+                    onMouseDown={e => { if (tool === 'select') { e.cancelBubble = true; startResize(d.h); } }}
+                  />
+                ));
+              })()}
+            </>
           )}
       {tool === 'select' && marqueeBox && (
             <>
