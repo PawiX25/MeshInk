@@ -20,10 +20,6 @@ interface LineData {
   authorId: string;
 }
 
-interface StackEntry {
-  line: LineData;
-  index: number;
-}
 
 interface MoveSnapshot { id: string; points: number[] }
 type UndoAction =
@@ -376,6 +372,8 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const undoRedoBusyRef = useRef(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectionBBox, setSelectionBBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [selectionBaseRect, setSelectionBaseRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [selectionAngle, setSelectionAngle] = useState(0);
   const [marqueeBox, setMarqueeBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const marqueeRef = useRef<{ start: { x: number; y: number }; current: { x: number; y: number } } | null>(null);
   const isMarqueeActiveRef = useRef(false);
@@ -383,9 +381,9 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const moveOriginalSnapshotsRef = useRef<MoveSnapshot[] | null>(null);
   const lastPointerPosRef = useRef<{ x: number; y: number } | null>(null);
   const isResizingRef = useRef(false);
-  const resizeDataRef = useRef<{ handle: string; originBBox: { x: number; y: number; width: number; height: number }; originSnapshots: MoveSnapshot[] } | null>(null);
+  const resizeDataRef = useRef<{ handle: string; originBBox: { x: number; y: number; width: number; height: number }; originSnapshots: MoveSnapshot[]; originAngle?: number; center?: { x: number; y: number } } | null>(null);
   const isRotatingRef = useRef(false);
-  const rotateDataRef = useRef<{ originSnapshots: MoveSnapshot[]; center: { x: number; y: number }; originAngle: number } | null>(null);
+  const rotateDataRef = useRef<{ originSnapshots: MoveSnapshot[]; center: { x: number; y: number }; originAngle: number; originBBox: { x: number; y: number; width: number; height: number }; liveAngle: number } | null>(null);
 
   useEffect(() => {
     linesRef.current = lines;
@@ -543,7 +541,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     return stage.getAbsoluteTransform().copy().invert().point(pointer);
   };
 
-  const handleMouseDown = (e?: Konva.KonvaEventObject<MouseEvent>) => {
+  const handleMouseDown = () => {
     if (tool === 'pan') return;
     if (tool === 'select') {
       const stageObj = stageRef.current;
@@ -557,14 +555,29 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           return;
         }
       }
-      if (selectionBBox && selectedIds.size > 0) {
+  if (selectionBBox && selectedIds.size > 0) {
         const h = getHandleUnderPointer(pointer);
         if (h) {
           startResize(h);
           return;
         }
       }
-      if (selectionBBox && pointer.x >= selectionBBox.x && pointer.x <= selectionBBox.x + selectionBBox.width && pointer.y >= selectionBBox.y && pointer.y <= selectionBBox.y + selectionBBox.height) {
+      const insideForMove = () => {
+        if (!selectionBBox) return false;
+        if (selectionAngle === 0) return pointer.x >= selectionBBox.x && pointer.x <= selectionBBox.x + selectionBBox.width && pointer.y >= selectionBBox.y && pointer.y <= selectionBBox.y + selectionBBox.height;
+        const base = selectionBaseRect || selectionBBox;
+        const a = selectionAngle;
+        const cx = base.x + base.width / 2;
+        const cy = base.y + base.height / 2;
+        const cos = Math.cos(-a);
+        const sin = Math.sin(-a);
+        const dx = pointer.x - cx;
+        const dy = pointer.y - cy;
+        const lx = dx * cos - dy * sin + cx;
+        const ly = dx * sin + dy * cos + cy;
+        return lx >= base.x && lx <= base.x + base.width && ly >= base.y && ly <= base.y + base.height;
+      };
+      if (selectionBBox && insideForMove()) {
         if (selectedIds.size > 0) {
           moveOriginalSnapshotsRef.current = Array.from(selectedIds).map(id => {
             const line = linesRef.current.find(l => l.id === id)!;
@@ -605,6 +618,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
         const delta = angle - originAngle;
         const cos = Math.cos(delta);
         const sin = Math.sin(delta);
+        rotateDataRef.current.liveAngle = delta;
         const updated: Record<string, number[]> = {};
         originSnapshots.forEach(s => {
           const pts: number[] = [];
@@ -625,91 +639,78 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           publishLineUpdate(upd);
           return upd;
         }));
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, maxStroke = 0;
-        linesRef.current.forEach(l => {
-          if (!selectedIds.has(l.id)) return;
-          for (let i = 0; i < l.points.length; i += 2) {
-            const px = l.points[i];
-            const py = l.points[i + 1];
-            if (px < minX) minX = px;
-            if (py < minY) minY = py;
-            if (px > maxX) maxX = px;
-            if (py > maxY) maxY = py;
-          }
-          if (l.strokeWidth > maxStroke) maxStroke = l.strokeWidth;
-        });
-        if (isFinite(minX)) {
-          const pad = maxStroke / 2 + 4;
-          setSelectionBBox({ x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 });
-        }
         const stageObj = stageRef.current;
         if (stageObj) stageObj.container().style.cursor = 'grabbing';
         return;
       }
       if (isResizingRef.current && resizeDataRef.current) {
-        const { handle, originBBox, originSnapshots } = resizeDataRef.current;
-        let x1 = originBBox.x;
-        let y1 = originBBox.y;
-        let x2 = originBBox.x + originBBox.width;
-        let y2 = originBBox.y + originBBox.height;
-        if (handle.includes('w')) x1 = pointer.x;
-        if (handle.includes('e')) x2 = pointer.x;
-        if (handle.includes('n')) y1 = pointer.y;
-        if (handle.includes('s')) y2 = pointer.y;
-        if (x2 - x1 === 0 || y2 - y1 === 0) return;
-        const minW = 1e-6;
-        const minH = 1e-6;
-        if (x2 < x1) [x1, x2] = [x2, x1];
-        if (y2 < y1) [y1, y2] = [y2, y1];
-        if (x2 - x1 < minW || y2 - y1 < minH) return;
-        const scaleX = (x2 - x1) / originBBox.width;
-        const scaleY = (y2 - y1) / originBBox.height;
-        let anchorX: number;
-        let anchorY: number;
-        if (handle.includes('w')) anchorX = originBBox.x + originBBox.width; else if (handle.includes('e')) anchorX = originBBox.x; else anchorX = originBBox.x + originBBox.width / 2;
-        if (handle.includes('n')) anchorY = originBBox.y + originBBox.height; else if (handle.includes('s')) anchorY = originBBox.y; else anchorY = originBBox.y + originBBox.height / 2;
-        const updatedLines: Record<string, number[]> = {};
-        originSnapshots.forEach(s => {
-          const line = linesRef.current.find(l => l.id === s.id);
-            if (!line) return;
-            const newPoints: number[] = [];
-            for (let i = 0; i < s.points.length; i += 2) {
-              const ox = s.points[i];
-              const oy = s.points[i + 1];
-              const nx = anchorX + (ox - anchorX) * scaleX;
-              const ny = anchorY + (oy - anchorY) * scaleY;
-              newPoints.push(nx, ny);
+        const { handle, originBBox, originSnapshots, originAngle = 0, center } = resizeDataRef.current;
+        const rotated = Math.abs(originAngle) > 1e-10;
+        if (!rotated) {
+          let x1 = originBBox.x, y1 = originBBox.y, x2 = originBBox.x + originBBox.width, y2 = originBBox.y + originBBox.height;
+          if (handle.includes('w')) x1 = pointer.x; if (handle.includes('e')) x2 = pointer.x; if (handle.includes('n')) y1 = pointer.y; if (handle.includes('s')) y2 = pointer.y;
+          if (x2 - x1 === 0 || y2 - y1 === 0) return;
+          if (x2 < x1) [x1, x2] = [x2, x1]; if (y2 < y1) [y1, y2] = [y2, y1];
+          const minW = 1e-6, minH = 1e-6; if (x2 - x1 < minW || y2 - y1 < minH) return;
+          const scaleX = (x2 - x1) / originBBox.width; const scaleY = (y2 - y1) / originBBox.height;
+          let anchorX: number; let anchorY: number;
+          if (handle.includes('w')) anchorX = originBBox.x + originBBox.width; else if (handle.includes('e')) anchorX = originBBox.x; else anchorX = originBBox.x + originBBox.width / 2;
+          if (handle.includes('n')) anchorY = originBBox.y + originBBox.height; else if (handle.includes('s')) anchorY = originBBox.y; else anchorY = originBBox.y + originBBox.height / 2;
+          const updated: Record<string, number[]> = {};
+          originSnapshots.forEach(s => {
+            const np: number[] = [];
+            for (let i=0;i<s.points.length;i+=2){
+              const ox = s.points[i], oy = s.points[i+1];
+              np.push(anchorX + (ox-anchorX)*scaleX, anchorY + (oy-anchorY)*scaleY);
             }
-            updatedLines[s.id] = newPoints;
-        });
-        setLines(prev => prev.map(l => {
-          if (!selectedIds.has(l.id)) return l;
-          const pts = updatedLines[l.id];
-          if (!pts) return l;
-          const upd = { ...l, points: pts };
-          publishLineUpdate(upd);
-          return upd;
-        }));
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, maxStroke = 0;
-        linesRef.current.forEach(l => {
-          if (!selectedIds.has(l.id)) return;
-          for (let i = 0; i < l.points.length; i += 2) {
-            const px = l.points[i];
-            const py = l.points[i + 1];
-            if (px < minX) minX = px;
-            if (py < minY) minY = py;
-            if (px > maxX) maxX = px;
-            if (py > maxY) maxY = py;
-          }
-          if (l.strokeWidth > maxStroke) maxStroke = l.strokeWidth;
-        });
-        if (isFinite(minX)) {
-          const pad = maxStroke / 2 + 4;
-          setSelectionBBox({ x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 });
+            updated[s.id] = np;
+          });
+          setLines(prev => prev.map(l => { if (!selectedIds.has(l.id)) return l; const pts = updated[l.id]; if (!pts) return l; const upd = { ...l, points: pts }; publishLineUpdate(upd); return upd; }));
+          let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity,maxStroke=0;
+          linesRef.current.forEach(l=>{ if(!selectedIds.has(l.id)) return; for(let i=0;i<l.points.length;i+=2){ const px=l.points[i], py=l.points[i+1]; if(px<minX)minX=px; if(py<minY)minY=py; if(px>maxX)maxX=px; if(py>maxY)maxY=py;} if(l.strokeWidth>maxStroke) maxStroke=l.strokeWidth;});
+          if(isFinite(minX)){ const pad=maxStroke/2+4; setSelectionBBox({x:minX-pad,y:minY-pad,width:(maxX-minX)+pad*2,height:(maxY-minY)+pad*2}); setSelectionBaseRect({x:minX-pad,y:minY-pad,width:(maxX-minX)+pad*2,height:(maxY-minY)+pad*2}); }
+          const stageObj=stageRef.current; if(stageObj) stageObj.container().style.cursor=getResizeCursor(handle); return;
+        } else {
+          if (!center) return;
+          const cosA = Math.cos(-originAngle), sinA = Math.sin(-originAngle);
+          const dxp = pointer.x - center.x, dyp = pointer.y - center.y;
+          const localX = center.x + dxp * cosA - dyp * sinA;
+          const localY = center.y + dxp * sinA + dyp * cosA;
+          let x1 = originBBox.x, y1 = originBBox.y, x2 = originBBox.x + originBBox.width, y2 = originBBox.y + originBBox.height;
+          if (handle.includes('w')) x1 = localX; if (handle.includes('e')) x2 = localX; if (handle.includes('n')) y1 = localY; if (handle.includes('s')) y2 = localY;
+          if (x2 - x1 === 0 || y2 - y1 === 0) return; if (x2 < x1) [x1,x2]=[x2,x1]; if (y2<y1)[y1,y2]=[y2,y1];
+          const minW=1e-6,minH=1e-6; if((x2-x1)<minW||(y2-y1)<minH) return;
+          const scaleX=(x2-x1)/originBBox.width, scaleY=(y2-y1)/originBBox.height;
+          let anchorX: number; let anchorY: number;
+          if (handle.includes('w')) anchorX = originBBox.x + originBBox.width; else if (handle.includes('e')) anchorX = originBBox.x; else anchorX = originBBox.x + originBBox.width/2;
+          if (handle.includes('n')) anchorY = originBBox.y + originBBox.height; else if (handle.includes('s')) anchorY = originBBox.y; else anchorY = originBBox.y + originBBox.height/2;
+          const updated: Record<string, number[]> = {};
+          originSnapshots.forEach(s => {
+            const pts: number[] = [];
+            for(let i=0;i<s.points.length;i+=2){
+              const ox=s.points[i], oy=s.points[i+1];
+              const dx0=ox-center.x, dy0=oy-center.y;
+              const lx=center.x + dx0 * cosA - dy0 * sinA;
+              const ly=center.y + dx0 * sinA + dy0 * cosA;
+              const nxLocal = anchorX + (lx - anchorX) * scaleX;
+              const nyLocal = anchorY + (ly - anchorY) * scaleY;
+              const cosB = Math.cos(originAngle), sinB = Math.sin(originAngle);
+              const dx1 = nxLocal - center.x, dy1 = nyLocal - center.y;
+              const wx = center.x + dx1 * cosB - dy1 * sinB;
+              const wy = center.y + dx1 * sinB + dy1 * cosB;
+              pts.push(wx, wy);
+            }
+            updated[s.id]=pts;
+          });
+          setLines(prev=>prev.map(l=>{ if(!selectedIds.has(l.id)) return l; const pts=updated[l.id]; if(!pts) return l; const upd={...l, points: pts}; publishLineUpdate(upd); return upd;}));
+          setSelectionBaseRect({ x: x1, y: y1, width: x2 - x1, height: y2 - y1 });
+          let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity, strokeMax=0;
+          Object.values(updated).forEach(pts=>{ for(let i=0;i<pts.length;i+=2){ const px=pts[i], py=pts[i+1]; if(px<minX)minX=px; if(py<minY)minY=py; if(px>maxX)maxX=px; if(py>maxY)maxY=py; }});
+          linesRef.current.forEach(l=>{ if(selectedIds.has(l.id)) strokeMax=Math.max(strokeMax,l.strokeWidth); });
+          if(isFinite(minX)){ const pad=strokeMax/2+4; setSelectionBBox({x:minX-pad,y:minY-pad,width:(maxX-minX)+pad*2,height:(maxY-minY)+pad*2}); }
+          const stageObj=stageRef.current; if(stageObj) stageObj.container().style.cursor=getResizeCursor(handle);
+          return;
         }
-        const stageObj = stageRef.current;
-        if (stageObj) stageObj.container().style.cursor = getResizeCursor(handle);
-        return;
       }
       if (isSelectionMovingRef.current && lastPointerPosRef.current) {
         const last = lastPointerPosRef.current;
@@ -760,7 +761,24 @@ const Canvas = ({ roomId }: { roomId: string }) => {
             return;
           }
         }
-        if (selectionBBox && pointer.x >= selectionBBox.x && pointer.x <= selectionBBox.x + selectionBBox.width && pointer.y >= selectionBBox.y && pointer.y <= selectionBBox.y + selectionBBox.height) {
+        const isInsideRotated = () => {
+          if (!selectionBBox) return false;
+          if (selectionAngle === 0 && !(isRotatingRef.current && rotateDataRef.current)) {
+            return pointer.x >= selectionBBox.x && pointer.x <= selectionBBox.x + selectionBBox.width && pointer.y >= selectionBBox.y && pointer.y <= selectionBBox.y + selectionBBox.height;
+          }
+          const base = selectionBaseRect || selectionBBox;
+          const a = selectionAngle + (isRotatingRef.current && rotateDataRef.current ? rotateDataRef.current.liveAngle : 0);
+          const cx = base.x + base.width / 2;
+          const cy = base.y + base.height / 2;
+          const cos = Math.cos(-a);
+          const sin = Math.sin(-a);
+          const dx = pointer.x - cx;
+          const dy = pointer.y - cy;
+          const lx = dx * cos - dy * sin + cx;
+          const ly = dx * sin + dy * cos + cy;
+          return lx >= base.x && lx <= base.x + base.width && ly >= base.y && ly <= base.y + base.height;
+        };
+        if (selectionBBox && isInsideRotated()) {
           stageObj.container().style.cursor = 'grab';
         } else {
           stageObj.container().style.cursor = 'default';
@@ -796,6 +814,10 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           setMyUndoStack(prev => [...prev, { type: 'move', before, after }]);
           setMyRedoStack([]);
         }
+  const delta = rotateDataRef.current.liveAngle;
+  setSelectionAngle(a => a + delta);
+  setSelectionBaseRect(prev => prev || rotateDataRef.current?.originBBox || null);
+  setSelectionBBox(prev => prev ? { ...prev } : prev);
         isRotatingRef.current = false;
         rotateDataRef.current = null;
         return;
@@ -868,6 +890,8 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           if (newSelected.size > 0 && isFinite(minX)) {
             const pad = maxStroke / 2 + 4;
             setSelectionBBox({ x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 });
+            setSelectionBaseRect({ x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 });
+            setSelectionAngle(0);
           } else setSelectionBBox(null);
         }
         marqueeRef.current = null;
@@ -1038,6 +1062,8 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     if (tool !== 'select') {
       setSelectedIds(new Set());
       setSelectionBBox(null);
+  setSelectionBaseRect(null);
+  setSelectionAngle(0);
       marqueeRef.current = null;
       setMarqueeBox(null);
       isResizingRef.current = false;
@@ -1048,28 +1074,31 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   }, [tool]);
 
   const getHandleUnderPointer = (p: { x: number; y: number }) => {
-    if (!selectionBBox) return null;
+    if (!selectionBBox || selectedIds.size === 0) return null;
     const sizeScreen = 14;
-    const world = sizeScreen / stage.scale;
-    const half = world / 2;
-    const x1 = selectionBBox.x;
-    const y1 = selectionBBox.y;
-    const x2 = x1 + selectionBBox.width;
-    const y2 = y1 + selectionBBox.height;
-    const xc = (x1 + x2) / 2;
-    const yc = (y1 + y2) / 2;
-    const handles: { h: string; x: number; y: number }[] = [
-      { h: 'nw', x: x1, y: y1 },
-      { h: 'n', x: xc, y: y1 },
-      { h: 'ne', x: x2, y: y1 },
-      { h: 'w', x: x1, y: yc },
-      { h: 'e', x: x2, y: yc },
-      { h: 'sw', x: x1, y: y2 },
-      { h: 's', x: xc, y: y2 },
-      { h: 'se', x: x2, y: y2 },
+    const half = (sizeScreen / stage.scale) / 2;
+    const base = (selectionAngle !== 0 || (isRotatingRef.current && rotateDataRef.current)) ? (selectionBaseRect || selectionBBox) : selectionBBox;
+    const x1 = base.x, y1 = base.y, x2 = x1 + base.width, y2 = y1 + base.height;
+    const xc = (x1 + x2) / 2, yc = (y1 + y2) / 2;
+    const raw = [
+      { h: 'nw', x: x1, y: y1 }, { h: 'n', x: xc, y: y1 }, { h: 'ne', x: x2, y: y1 },
+      { h: 'e', x: x2, y: yc }, { h: 'se', x: x2, y: y2 }, { h: 's', x: xc, y: y2 },
+      { h: 'sw', x: x1, y: y2 }, { h: 'w', x: x1, y: yc },
     ];
-    for (const hd of handles) {
-      if (Math.abs(p.x - hd.x) <= half && Math.abs(p.y - hd.y) <= half) return hd.h;
+    const liveAngle = selectionAngle + (isRotatingRef.current && rotateDataRef.current ? rotateDataRef.current.liveAngle : 0);
+    if (Math.abs(liveAngle) < 1e-10) {
+      for (const h of raw) {
+        if (Math.abs(p.x - h.x) <= half && Math.abs(p.y - h.y) <= half) return h.h;
+      }
+      return null;
+    }
+    const center = { x: base.x + base.width / 2, y: base.y + base.height / 2 };
+    for (const h of raw) {
+      const dx = h.x - center.x;
+      const dy = h.y - center.y;
+      const rx = center.x + dx * Math.cos(liveAngle) - dy * Math.sin(liveAngle);
+      const ry = center.y + dx * Math.sin(liveAngle) + dy * Math.cos(liveAngle);
+      if (Math.abs(p.x - rx) <= half && Math.abs(p.y - ry) <= half) return h.h;
     }
     return null;
   };
@@ -1083,44 +1112,62 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   };
 
   const startResize = (handle: string) => {
-    if (!selectionBBox) return;
-    const originSnapshots: MoveSnapshot[] = Array.from(selectedIds).map(id => {
-      const line = linesRef.current.find(l => l.id === id)!;
-      return { id, points: [...line.points] };
-    });
+    if (!selectionBBox || selectedIds.size === 0) return;
+    const originSnapshots: MoveSnapshot[] = Array.from(selectedIds).map(id => ({ id, points: [...(linesRef.current.find(l => l.id === id)!.points)] }));
     if (originSnapshots.length === 0) return;
+    const base = (selectionAngle !== 0 || (isRotatingRef.current && rotateDataRef.current)) ? (selectionBaseRect || selectionBBox) : selectionBBox;
+    const center = { x: base.x + base.width / 2, y: base.y + base.height / 2 };
     isResizingRef.current = true;
-    resizeDataRef.current = { handle, originBBox: { ...selectionBBox }, originSnapshots };
-    const stageObj = stageRef.current;
-    if (stageObj) stageObj.container().style.cursor = getResizeCursor(handle);
+    resizeDataRef.current = {
+      handle,
+      originBBox: { ...base },
+      originSnapshots,
+      originAngle: selectionAngle + (isRotatingRef.current && rotateDataRef.current ? rotateDataRef.current.liveAngle : 0),
+      center
+    };
+    const stageObj = stageRef.current; if (stageObj) stageObj.container().style.cursor = getResizeCursor(handle);
   };
 
   const isOnRotationHandle = (p: { x: number; y: number }) => {
-    if (!selectionBBox) return false;
-    const offsetScreen = 30;
-    const sizeScreen = 16;
-    const offset = offsetScreen / stage.scale;
-    const r = sizeScreen / stage.scale / 2;
-    const cx = selectionBBox.x + selectionBBox.width / 2;
-    const cy = selectionBBox.y - offset;
-    const dx = p.x - cx;
-    const dy = p.y - cy;
-    return dx * dx + dy * dy <= r * r;
+  if (!selectionBBox) return false;
+  const offsetScreen = 30;
+  const sizeScreen = 16;
+  const r = sizeScreen / stage.scale / 2;
+  const base = selectionBaseRect || selectionBBox;
+  const a = selectionAngle + (isRotatingRef.current && rotateDataRef.current ? rotateDataRef.current.liveAngle : 0);
+  const center = { x: base.x + base.width / 2, y: base.y + base.height / 2 };
+  const midTop = { x: base.x + base.width / 2, y: base.y };
+  const dx0 = midTop.x - center.x;
+  const dy0 = midTop.y - center.y;
+  const cos = Math.cos(a);
+  const sin = Math.sin(a);
+  const rmx = center.x + dx0 * cos - dy0 * sin;
+  const rmy = center.y + dx0 * sin + dy0 * cos;
+  const len = Math.sqrt((rmx - center.x) ** 2 + (rmy - center.y) ** 2) || 1;
+  const normX = (rmx - center.x) / len;
+  const normY = (rmy - center.y) / len;
+  const handleDist = offsetScreen / stage.scale;
+  const cx = rmx + normX * handleDist;
+  const cy = rmy + normY * handleDist;
+  const dx = p.x - cx;
+  const dy = p.y - cy;
+  return dx * dx + dy * dy <= r * r;
   };
 
   const startRotate = (pointer: { x: number; y: number }) => {
-    if (!selectionBBox) return;
+  if (!selectionBBox) return;
     const originSnapshots: MoveSnapshot[] = Array.from(selectedIds).map(id => {
       const line = linesRef.current.find(l => l.id === id)!;
       return { id, points: [...line.points] };
     });
     if (originSnapshots.length === 0) return;
-    const center = { x: selectionBBox.x + selectionBBox.width / 2, y: selectionBBox.y + selectionBBox.height / 2 };
+  const base = selectionBaseRect || selectionBBox;
+  const center = { x: base.x + base.width / 2, y: base.y + base.height / 2 };
     const dx = pointer.x - center.x;
     const dy = pointer.y - center.y;
     const originAngle = Math.atan2(dy, dx);
     isRotatingRef.current = true;
-    rotateDataRef.current = { originSnapshots, center, originAngle };
+  rotateDataRef.current = { originSnapshots, center, originAngle, originBBox: { ...base }, liveAngle: 0 };
     const stageObj = stageRef.current;
     if (stageObj) stageObj.container().style.cursor = 'grabbing';
   };
@@ -1295,7 +1342,7 @@ const SelectIcon = ({
           <ToolButton name="pen"><PencilIcon /></ToolButton>
           <ToolButton name="eraser"><EraserIcon /></ToolButton>
           <ToolButton name="pan"><HandIcon /></ToolButton>
-          <ToolButton name="select"><SelectIcon active={tool === 'select'} mode={theme as any} /></ToolButton>
+          <ToolButton name="select"><SelectIcon active={tool === 'select'} mode={(theme === 'dark' || theme === 'light') ? theme : undefined} /></ToolButton>
         </div>
         <hr className="w-full border-slate-300 dark:border-slate-600" />
   <ZoomIndicator scale={stage.scale} />
@@ -1376,8 +1423,12 @@ const SelectIcon = ({
                     }
                     const pad = line.strokeWidth / 2 + 4;
                     setSelectionBBox({ x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 });
+                      setSelectionBaseRect({ x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 });
+                      setSelectionAngle(0);
                   } else {
                     setSelectionBBox(null);
+                      setSelectionBaseRect(null);
+                      setSelectionAngle(0);
                   }
                   isSelectionMovingRef.current = false;
                   lastPointerPosRef.current = null;
@@ -1385,7 +1436,64 @@ const SelectIcon = ({
               }}
             />
           ))}
-          {tool === 'select' && selectionBBox && selectedIds.size > 0 && (
+          {tool === 'select' && selectionBBox && selectedIds.size > 0 && ((isRotatingRef.current && rotateDataRef.current) || selectionAngle !== 0) && (() => {
+            const active = isRotatingRef.current && rotateDataRef.current;
+            const base = selectionBaseRect || selectionBBox;
+            const a = (selectionAngle + (active ? rotateDataRef.current!.liveAngle : 0));
+            const center = { x: base.x + base.width / 2, y: base.y + base.height / 2 };
+            const originBBox = base;
+            const liveAngle = a;
+            const x1 = originBBox.x;
+            const y1 = originBBox.y;
+            const x2 = x1 + originBBox.width;
+            const y2 = y1 + originBBox.height;
+            const corners = [
+              { x: x1, y: y1 },
+              { x: x2, y: y1 },
+              { x: x2, y: y2 },
+              { x: x1, y: y2 },
+            ].map(p => {
+              const dx = p.x - center.x;
+              const dy = p.y - center.y;
+              const rx = center.x + dx * Math.cos(liveAngle) - dy * Math.sin(liveAngle);
+              const ry = center.y + dx * Math.sin(liveAngle) + dy * Math.cos(liveAngle);
+              return { x: rx, y: ry };
+            });
+            const pts: number[] = [];
+            corners.forEach(c => { pts.push(c.x, c.y); });
+            pts.push(corners[0].x, corners[0].y);
+            const midTop = { x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2 };
+            const dirX = midTop.x - center.x;
+            const dirY = midTop.y - center.y;
+            const len = Math.sqrt(dirX * dirX + dirY * dirY) || 1;
+            const normX = dirX / len;
+            const normY = dirY / len;
+            const handleDist = 30 / stage.scale;
+            const rotHandle = { x: midTop.x + normX * handleDist, y: midTop.y + normY * handleDist };
+            const r = 16 / stage.scale / 2;
+            const sizeScreen = 14; const w = sizeScreen / stage.scale; const half = w/2;
+            const handleDefs = [
+              { h:'nw', p: corners[0] },
+              { h:'n', p: { x:(corners[0].x+corners[1].x)/2, y:(corners[0].y+corners[1].y)/2 } },
+              { h:'ne', p: corners[1] },
+              { h:'e', p: { x:(corners[1].x+corners[2].x)/2, y:(corners[1].y+corners[2].y)/2 } },
+              { h:'se', p: corners[2] },
+              { h:'s', p: { x:(corners[2].x+corners[3].x)/2, y:(corners[2].y+corners[3].y)/2 } },
+              { h:'sw', p: corners[3] },
+              { h:'w', p: { x:(corners[3].x+corners[0].x)/2, y:(corners[3].y+corners[0].y)/2 } },
+            ];
+            return (
+              <>
+                <Line points={pts} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} dash={[6 / stage.scale, 4 / stage.scale]} closed listening={false} />
+                <Line points={[midTop.x, midTop.y, rotHandle.x, rotHandle.y]} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} listening={false} />
+                <Rect x={rotHandle.x - r} y={rotHandle.y - r} width={r * 2} height={r * 2} cornerRadius={r} fill={theme === 'dark' ? '#1e293b' : '#f1f5f9'} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} onMouseDown={e => { if (tool === 'select') { e.cancelBubble = true; startRotate(rotHandle); } }} />
+                {!active && handleDefs.map(h => (
+                  <Rect key={h.h} x={h.p.x - half} y={h.p.y - half} width={w} height={w} fill={theme === 'dark' ? '#1e293b' : '#f1f5f9'} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} onMouseDown={e => { if (tool === 'select') { e.cancelBubble = true; startResize(h.h); } }} />
+                ))}
+              </>
+            );
+          })()}
+          {tool === 'select' && selectionBBox && selectedIds.size > 0 && selectionAngle === 0 && !isRotatingRef.current && (
             <Rect
               x={selectionBBox.x}
               y={selectionBBox.y}
@@ -1397,7 +1505,7 @@ const SelectIcon = ({
               listening={false}
             />
           )}
-          {tool === 'select' && selectionBBox && selectedIds.size > 0 && (
+          {tool === 'select' && selectionBBox && selectedIds.size > 0 && selectionAngle === 0 && !isRotatingRef.current && (
             <>
               {(() => {
                 const sizeScreen = 14;
@@ -1420,7 +1528,7 @@ const SelectIcon = ({
                   { h: 's', x: xc, y: y2 },
                   { h: 'se', x: x2, y: y2 },
                 ];
-                return data.map(d => (
+                return !isRotatingRef.current ? data.map(d => (
                   <Rect
                     key={d.h}
                     x={d.x - half}
@@ -1432,7 +1540,7 @@ const SelectIcon = ({
                     strokeWidth={1 / stage.scale}
                     onMouseDown={e => { if (tool === 'select') { e.cancelBubble = true; startResize(d.h); } }}
                   />
-                ));
+                )) : null;
               })()}
               {(() => {
                 const offsetScreen = 30;
@@ -1441,22 +1549,12 @@ const SelectIcon = ({
                 const r = sizeScreen / stage.scale / 2;
                 const cx = selectionBBox.x + selectionBBox.width / 2;
                 const cy = selectionBBox.y - offset;
-                return (
+                return !isRotatingRef.current ? (
                   <>
                     <Line points={[cx, selectionBBox.y, cx, cy + r]} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} listening={false} />
-                    <Rect
-                      x={cx - r}
-                      y={cy - r}
-                      width={r * 2}
-                      height={r * 2}
-                      cornerRadius={r}
-                      fill={theme === 'dark' ? '#1e293b' : '#f1f5f9'}
-                      stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'}
-                      strokeWidth={1 / stage.scale}
-                      onMouseDown={e => { if (tool === 'select') { e.cancelBubble = true; startRotate({ x: cx, y: cy }); } }}
-                    />
+                    <Rect x={cx - r} y={cy - r} width={r * 2} height={r * 2} cornerRadius={r} fill={theme === 'dark' ? '#1e293b' : '#f1f5f9'} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} onMouseDown={e => { if (tool === 'select') { e.cancelBubble = true; startRotate({ x: cx, y: cy }); } }} />
                   </>
-                );
+                ) : null;
               })()}
             </>
           )}
