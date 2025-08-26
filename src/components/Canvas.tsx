@@ -667,8 +667,8 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           });
           setLines(prev => prev.map(l => { if (!selectedIds.has(l.id)) return l; const pts = updated[l.id]; if (!pts) return l; const upd = { ...l, points: pts }; publishLineUpdate(upd); return upd; }));
           let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity,maxStroke=0;
-          linesRef.current.forEach(l=>{ if(!selectedIds.has(l.id)) return; for(let i=0;i<l.points.length;i+=2){ const px=l.points[i], py=l.points[i+1]; if(px<minX)minX=px; if(py<minY)minY=py; if(px>maxX)maxX=px; if(py>maxY)maxY=py;} if(l.strokeWidth>maxStroke) maxStroke=l.strokeWidth;});
-          if(isFinite(minX)){ const pad=maxStroke/2+4; setSelectionBBox({x:minX-pad,y:minY-pad,width:(maxX-minX)+pad*2,height:(maxY-minY)+pad*2}); setSelectionBaseRect({x:minX-pad,y:minY-pad,width:(maxX-minX)+pad*2,height:(maxY-minY)+pad*2}); }
+          originSnapshots.forEach(s=>{ const pts=updated[s.id]||s.points; for(let i=0;i<pts.length;i+=2){ const px=pts[i], py=pts[i+1]; if(px<minX)minX=px; if(py<minY)minY=py; if(px>maxX)maxX=px; if(py>maxY)maxY=py; } const line=linesRef.current.find(l=>l.id===s.id); if(line && line.strokeWidth>maxStroke) maxStroke=line.strokeWidth; });
+          if(isFinite(minX)){ const pad=maxStroke/2+4; const bbox={x:minX-pad,y:minY-pad,width:(maxX-minX)+pad*2,height:(maxY-minY)+pad*2}; setSelectionBBox(bbox); setSelectionBaseRect(bbox); }
           const stageObj=stageRef.current; if(stageObj) stageObj.container().style.cursor=getResizeCursor(handle); return;
         } else {
           if (!center) return;
@@ -684,6 +684,11 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           let anchorX: number; let anchorY: number;
           if (handle.includes('w')) anchorX = originBBox.x + originBBox.width; else if (handle.includes('e')) anchorX = originBBox.x; else anchorX = originBBox.x + originBBox.width/2;
           if (handle.includes('n')) anchorY = originBBox.y + originBBox.height; else if (handle.includes('s')) anchorY = originBBox.y; else anchorY = originBBox.y + originBBox.height/2;
+
+          const newCenterX = (x1 + x2) / 2;
+          const newCenterY = (y1 + y2) / 2;
+
+          const cosB = Math.cos(originAngle), sinB = Math.sin(originAngle);
           const updated: Record<string, number[]> = {};
           originSnapshots.forEach(s => {
             const pts: number[] = [];
@@ -692,12 +697,12 @@ const Canvas = ({ roomId }: { roomId: string }) => {
               const dx0=ox-center.x, dy0=oy-center.y;
               const lx=center.x + dx0 * cosA - dy0 * sinA;
               const ly=center.y + dx0 * sinA + dy0 * cosA;
-              const nxLocal = anchorX + (lx - anchorX) * scaleX;
-              const nyLocal = anchorY + (ly - anchorY) * scaleY;
-              const cosB = Math.cos(originAngle), sinB = Math.sin(originAngle);
-              const dx1 = nxLocal - center.x, dy1 = nyLocal - center.y;
-              const wx = center.x + dx1 * cosB - dy1 * sinB;
-              const wy = center.y + dx1 * sinB + dy1 * cosB;
+              const sx = anchorX + (lx - anchorX) * scaleX;
+              const sy = anchorY + (ly - anchorY) * scaleY;
+
+              const dx1 = sx - newCenterX, dy1 = sy - newCenterY;
+              const wx = newCenterX + dx1 * cosB - dy1 * sinB;
+              const wy = newCenterY + dx1 * sinB + dy1 * cosB;
               pts.push(wx, wy);
             }
             updated[s.id]=pts;
@@ -726,7 +731,10 @@ const Canvas = ({ roomId }: { roomId: string }) => {
             return updated;
           }));
           if (selectionBBox) {
-            setSelectionBBox({ x: selectionBBox.x + dx, y: selectionBBox.y + dy, width: selectionBBox.width, height: selectionBBox.height });
+            setSelectionBBox(prev => prev ? { x: prev.x + dx, y: prev.y + dy, width: prev.width, height: prev.height } : prev);
+          }
+          if (selectionAngle !== 0 || (isRotatingRef.current && rotateDataRef.current)) {
+            setSelectionBaseRect(prev => prev ? { x: prev.x + dx, y: prev.y + dy, width: prev.width, height: prev.height } : prev);
           }
         }
         const stageObj = stageRef.current;
@@ -1113,7 +1121,10 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
   const startResize = (handle: string) => {
     if (!selectionBBox || selectedIds.size === 0) return;
-    const originSnapshots: MoveSnapshot[] = Array.from(selectedIds).map(id => ({ id, points: [...(linesRef.current.find(l => l.id === id)!.points)] }));
+    const originSnapshots: MoveSnapshot[] = Array.from(selectedIds).map(id => {
+      const src = (lines.find(l => l.id === id) || linesRef.current.find(l => l.id === id))!;
+      return { id, points: [...src.points] };
+    });
     if (originSnapshots.length === 0) return;
     const base = (selectionAngle !== 0 || (isRotatingRef.current && rotateDataRef.current)) ? (selectionBaseRect || selectionBBox) : selectionBBox;
     const center = { x: base.x + base.width / 2, y: base.y + base.height / 2 };
@@ -1133,7 +1144,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const offsetScreen = 30;
   const sizeScreen = 16;
   const r = sizeScreen / stage.scale / 2;
-  const base = selectionBaseRect || selectionBBox;
+  const base = (selectionAngle !== 0 || (isRotatingRef.current && rotateDataRef.current)) ? (selectionBaseRect || selectionBBox) : selectionBBox;
   const a = selectionAngle + (isRotatingRef.current && rotateDataRef.current ? rotateDataRef.current.liveAngle : 0);
   const center = { x: base.x + base.width / 2, y: base.y + base.height / 2 };
   const midTop = { x: base.x + base.width / 2, y: base.y };
@@ -1157,11 +1168,11 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const startRotate = (pointer: { x: number; y: number }) => {
   if (!selectionBBox) return;
     const originSnapshots: MoveSnapshot[] = Array.from(selectedIds).map(id => {
-      const line = linesRef.current.find(l => l.id === id)!;
-      return { id, points: [...line.points] };
+      const src = (lines.find(l => l.id === id) || linesRef.current.find(l => l.id === id))!;
+      return { id, points: [...src.points] };
     });
     if (originSnapshots.length === 0) return;
-  const base = selectionBaseRect || selectionBBox;
+  const base = (selectionBaseRect || selectionBBox) as { x: number; y: number; width: number; height: number };
   const center = { x: base.x + base.width / 2, y: base.y + base.height / 2 };
     const dx = pointer.x - center.x;
     const dy = pointer.y - center.y;
@@ -1486,7 +1497,7 @@ const SelectIcon = ({
               <>
                 <Line points={pts} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} dash={[6 / stage.scale, 4 / stage.scale]} closed listening={false} />
                 <Line points={[midTop.x, midTop.y, rotHandle.x, rotHandle.y]} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} listening={false} />
-                <Rect x={rotHandle.x - r} y={rotHandle.y - r} width={r * 2} height={r * 2} cornerRadius={r} fill={theme === 'dark' ? '#1e293b' : '#f1f5f9'} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} onMouseDown={e => { if (tool === 'select') { e.cancelBubble = true; startRotate(rotHandle); } }} />
+                <Rect x={rotHandle.x - r} y={rotHandle.y - r} width={r * 2} height={r * 2} cornerRadius={r} fill={theme === 'dark' ? '#1e293b' : '#f1f5f9'} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} onMouseDown={e => { if (tool === 'select') { e.cancelBubble = true; const p = getPointerPosition(); startRotate(p || rotHandle); } }} />
                 {!active && handleDefs.map(h => (
                   <Rect key={h.h} x={h.p.x - half} y={h.p.y - half} width={w} height={w} fill={theme === 'dark' ? '#1e293b' : '#f1f5f9'} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} onMouseDown={e => { if (tool === 'select') { e.cancelBubble = true; startResize(h.h); } }} />
                 ))}
@@ -1552,7 +1563,7 @@ const SelectIcon = ({
                 return !isRotatingRef.current ? (
                   <>
                     <Line points={[cx, selectionBBox.y, cx, cy + r]} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} listening={false} />
-                    <Rect x={cx - r} y={cy - r} width={r * 2} height={r * 2} cornerRadius={r} fill={theme === 'dark' ? '#1e293b' : '#f1f5f9'} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} onMouseDown={e => { if (tool === 'select') { e.cancelBubble = true; startRotate({ x: cx, y: cy }); } }} />
+                    <Rect x={cx - r} y={cy - r} width={r * 2} height={r * 2} cornerRadius={r} fill={theme === 'dark' ? '#1e293b' : '#f1f5f9'} stroke={theme === 'dark' ? '#60a5fa' : '#2563eb'} strokeWidth={1 / stage.scale} onMouseDown={e => { if (tool === 'select') { e.cancelBubble = true; const p = getPointerPosition(); startRotate(p || { x: cx, y: cy }); } }} />
                   </>
                 ) : null;
               })()}
