@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
@@ -363,6 +363,8 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const rafRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number | null>(null);
   const ably = useAbly();
+  const provisionalIdRef = useRef<string>('local-' + Math.random().toString(36).slice(2));
+  const [clientIdResolved, setClientIdResolved] = useState<boolean>(false);
   const { theme, setTheme } = useTheme();
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const linesRef = useRef<LineData[]>([]);
@@ -384,14 +386,40 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const resizeDataRef = useRef<{ handle: string; originBBox: { x: number; y: number; width: number; height: number }; originSnapshots: MoveSnapshot[]; originAngle?: number; center?: { x: number; y: number } } | null>(null);
   const isRotatingRef = useRef(false);
   const rotateDataRef = useRef<{ originSnapshots: MoveSnapshot[]; center: { x: number; y: number }; originAngle: number; originBBox: { x: number; y: number; width: number; height: number }; liveAngle: number } | null>(null);
+  const isShiftPressedRef = useRef(false);
 
   useEffect(() => {
     linesRef.current = lines;
   }, [lines]);
   useEffect(() => {
+    const realId = ably?.auth?.clientId as string | undefined;
+    if (!clientIdResolved && realId) {
+      setClientIdResolved(true);
+      const provisional = provisionalIdRef.current;
+      if (provisional && provisional !== realId) {
+        setLines(prev => prev.map(l => l.authorId === provisional ? { ...l, authorId: realId } : l));
+      }
+    }
+  }, [ably?.auth?.clientId, clientIdResolved]);
+  useEffect(() => {
     undoRef.current = myUndoStack;
     redoRef.current = myRedoStack;
   }, [myUndoStack, myRedoStack]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') isShiftPressedRef.current = true;
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') isShiftPressedRef.current = false;
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, []);
 
   useEffect(() => {
     const updateDimensions = () => {
@@ -598,8 +626,9 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     isDrawing.current = true;
     const pos = getPointerPosition();
     if (!pos) return;
-    const lineId = `${ably.auth.clientId}-${Date.now()}`;
-    const newLine: LineData = { id: lineId, points: [pos.x, pos.y], color, strokeWidth, tool, authorId: ably.auth.clientId as string };
+    const cid = (ably?.auth?.clientId as string) || provisionalIdRef.current;
+    const lineId = `${cid}-${Date.now()}`;
+    const newLine: LineData = { id: lineId, points: [pos.x, pos.y], color, strokeWidth, tool, authorId: cid };
     setLines((prev) => [...prev, newLine]);
     channel.publish('new-line', newLine);
     currentLineIdRef.current = lineId;
@@ -615,7 +644,11 @@ const Canvas = ({ roomId }: { roomId: string }) => {
         const dx = pointer.x - center.x;
         const dy = pointer.y - center.y;
         const angle = Math.atan2(dy, dx);
-        const delta = angle - originAngle;
+        let delta = angle - originAngle;
+        if (isShiftPressedRef.current) {
+          const step = Math.PI / 12;
+          delta = Math.round(delta / step) * step;
+        }
         const cos = Math.cos(delta);
         const sin = Math.sin(delta);
         rotateDataRef.current.liveAngle = delta;
@@ -650,6 +683,39 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           let x1 = originBBox.x, y1 = originBBox.y, x2 = originBBox.x + originBBox.width, y2 = originBBox.y + originBBox.height;
           if (handle.includes('w')) x1 = pointer.x; if (handle.includes('e')) x2 = pointer.x; if (handle.includes('n')) y1 = pointer.y; if (handle.includes('s')) y2 = pointer.y;
           if (x2 - x1 === 0 || y2 - y1 === 0) return;
+          if (isShiftPressedRef.current) {
+            const aspect = originBBox.width / originBBox.height;
+            const isCorner = (handle.includes('w') || handle.includes('e')) && (handle.includes('n') || handle.includes('s'));
+            const rawW = x2 - x1;
+            const rawH = y2 - y1;
+            if (isCorner) {
+              const dw = Math.abs(rawW - originBBox.width);
+              const dh = Math.abs(rawH - originBBox.height);
+              if (dw > dh) {
+                const targetH = rawW / aspect;
+                if (handle.includes('n')) y1 = y2 - targetH; else y2 = y1 + targetH;
+              } else {
+                const targetW = rawH * aspect;
+                if (handle.includes('w')) x1 = x2 - targetW; else x2 = x1 + targetW;
+              }
+            } else {
+              if (handle.includes('e') || handle.includes('w')) {
+                const targetH = (x2 - x1) / aspect;
+                const centerY = originBBox.y + originBBox.height / 2;
+                const anchorY = handle.includes('n') ? originBBox.y + originBBox.height : (handle.includes('s') ? originBBox.y : centerY);
+                if (anchorY === centerY) { y1 = centerY - targetH / 2; y2 = centerY + targetH / 2; }
+                else if (anchorY === originBBox.y) { y1 = anchorY; y2 = anchorY + targetH; }
+                else { y1 = anchorY - targetH; y2 = anchorY; }
+              } else {
+                const targetW = (y2 - y1) * aspect;
+                const centerX = originBBox.x + originBBox.width / 2;
+                const anchorX = handle.includes('w') ? originBBox.x + originBBox.width : (handle.includes('e') ? originBBox.x : centerX);
+                if (anchorX === centerX) { x1 = centerX - targetW / 2; x2 = centerX + targetW / 2; }
+                else if (anchorX === originBBox.x) { x1 = anchorX; x2 = anchorX + targetW; }
+                else { x1 = anchorX - targetW; x2 = anchorX; }
+              }
+            }
+          }
           if (x2 < x1) [x1, x2] = [x2, x1]; if (y2 < y1) [y1, y2] = [y2, y1];
           const minW = 1e-6, minH = 1e-6; if (x2 - x1 < minW || y2 - y1 < minH) return;
           const scaleX = (x2 - x1) / originBBox.width; const scaleY = (y2 - y1) / originBBox.height;
@@ -678,6 +744,40 @@ const Canvas = ({ roomId }: { roomId: string }) => {
           const localY = center.y + dxp * sinA + dyp * cosA;
           let x1 = originBBox.x, y1 = originBBox.y, x2 = originBBox.x + originBBox.width, y2 = originBBox.y + originBBox.height;
           if (handle.includes('w')) x1 = localX; if (handle.includes('e')) x2 = localX; if (handle.includes('n')) y1 = localY; if (handle.includes('s')) y2 = localY;
+          if (x2 - x1 === 0 || y2 - y1 === 0) return; if (x2 < x1) [x1,x2]=[x2,x1]; if (y2<y1)[y1,y2]=[y2,y1];
+          if (isShiftPressedRef.current) {
+            const aspect = originBBox.width / originBBox.height;
+            const isCorner = (handle.includes('w') || handle.includes('e')) && (handle.includes('n') || handle.includes('s'));
+            const rawW = x2 - x1;
+            const rawH = y2 - y1;
+            const dw = Math.abs(rawW - originBBox.width);
+            const dh = Math.abs(rawH - originBBox.height);
+            if (isCorner) {
+              if (dw > dh) {
+                const targetH = rawW / aspect;
+                if (handle.includes('n')) y1 = y2 - targetH; else y2 = y1 + targetH;
+              } else {
+                const targetW = rawH * aspect;
+                if (handle.includes('w')) x1 = x2 - targetW; else x2 = x1 + targetW;
+              }
+            } else {
+              if (handle.includes('e') || handle.includes('w')) {
+                const targetH = (x2 - x1) / aspect;
+                const centerY = originBBox.y + originBBox.height / 2;
+                const anchorY = handle.includes('n') ? originBBox.y + originBBox.height : (handle.includes('s') ? originBBox.y : centerY);
+                if (anchorY === centerY) { y1 = centerY - targetH / 2; y2 = centerY + targetH / 2; }
+                else if (anchorY === originBBox.y) { y1 = anchorY; y2 = anchorY + targetH; }
+                else { y1 = anchorY - targetH; y2 = anchorY; }
+              } else {
+                const targetW = (y2 - y1) * aspect;
+                const centerX = originBBox.x + originBBox.width / 2;
+                const anchorX = handle.includes('w') ? originBBox.x + originBBox.width : (handle.includes('e') ? originBBox.x : centerX);
+                if (anchorX === centerX) { x1 = centerX - targetW / 2; x2 = centerX + targetW / 2; }
+                else if (anchorX === originBBox.x) { x1 = anchorX; x2 = anchorX + targetW; }
+                else { x1 = anchorX - targetW; x2 = anchorX; }
+              }
+            }
+          }
           if (x2 - x1 === 0 || y2 - y1 === 0) return; if (x2 < x1) [x1,x2]=[x2,x1]; if (y2<y1)[y1,y2]=[y2,y1];
           const minW=1e-6,minH=1e-6; if((x2-x1)<minW||(y2-y1)<minH) return;
           const scaleX=(x2-x1)/originBBox.width, scaleY=(y2-y1)/originBBox.height;
