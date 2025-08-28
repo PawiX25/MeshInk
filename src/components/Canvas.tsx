@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { Stage, Layer, Line, Shape, Rect } from 'react-konva';
+import { Stage, Layer, Line, Shape, Rect, Circle, Text } from 'react-konva';
 import { useChannel, useAbly } from 'ably/react';
 import Konva from 'konva';
 import { throttle } from 'lodash';
@@ -124,6 +124,60 @@ const ClearCanvasModal: React.FC<ClearCanvasModalProps> = ({ isOpen, onClose, on
                 className="px-6 py-3 font-semibold text-white bg-red-500 rounded-xl hover:bg-red-600 focus:outline-none focus:ring-4 focus:ring-red-300 dark:focus:ring-red-800 transition-all duration-300"
               >
                 Clear Canvas
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+};
+
+const NicknameModal: React.FC<{
+  isOpen: boolean;
+  initial?: string;
+  onSave: (name: string) => void;
+}> = ({ isOpen, initial = '', onSave }) => {
+  const [value, setValue] = useState(initial);
+  useEffect(() => setValue(initial || ''), [initial]);
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            className="relative bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-md m-4 border border-slate-200 dark:border-slate-700"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="p-8 text-center">
+              <h2 className="mt-1 text-2xl font-bold text-slate-800 dark:text-white">Choose your nickname</h2>
+              <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">This nickname will be visible to others in the room.</p>
+              <div className="mt-6">
+                <input
+                  autoFocus
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && value.trim()) onSave(value.trim()); }}
+                  className="w-full px-4 py-3 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white outline-none"
+                  placeholder="e.g., Anna, Ben..."
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-4 p-4 bg-slate-50 dark:bg-slate-800/50 rounded-b-2xl">
+              <button
+                onClick={() => { if (value.trim()) onSave(value.trim()); }}
+                className="px-6 py-3 font-semibold text-white bg-blue-500 rounded-xl hover:bg-blue-600 focus:outline-none focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-800 transition-all duration-300 disabled:opacity-50"
+                disabled={!value.trim()}
+              >
+                Save
               </button>
             </div>
           </motion.div>
@@ -387,6 +441,13 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const isRotatingRef = useRef(false);
   const rotateDataRef = useRef<{ originSnapshots: MoveSnapshot[]; center: { x: number; y: number }; originAngle: number; originBBox: { x: number; y: number; width: number; height: number }; liveAngle: number } | null>(null);
   const isShiftPressedRef = useRef(false);
+  const [nickname, setNickname] = useState('');
+  const [isNickModalOpen, setNickModalOpen] = useState(false);
+  const [members, setMembers] = useState<{ clientId: string; nick: string }[]>([]);
+  const stagesByClientRef = useRef<Record<string, StageState>>({});
+  const presenceEnteredRef = useRef(false);
+  const fallbackNick = useCallback((id: string) => `User ${String(id || '').slice(0, 4).toUpperCase()}`, []);
+  const [remoteCursors, setRemoteCursors] = useState<Record<string, { x: number; y: number; t: number }>>({});
 
   useEffect(() => {
     linesRef.current = lines;
@@ -431,8 +492,60 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   }, []);
 
   useEffect(() => {
-    zoomTargetRef.current = stage;
-  }, [stage]);
+    const saved = localStorage.getItem('meshink-nickname');
+    if (saved && saved.trim()) {
+      setNickname(saved.trim());
+    } else {
+      setNickModalOpen(true);
+    }
+  }, []);
+
+
+  useEffect(() => {
+    const cid = ably?.auth?.clientId as string | undefined;
+    if (!cid) return;
+    stagesByClientRef.current[cid] = stage;
+  }, [stage, ably?.auth?.clientId]);
+
+  const teleportToPoint = (wx: number, wy: number, desiredScale: number = 1) => {
+    const cx = dimensions.width / 2;
+    const cy = dimensions.height / 2;
+    const targetX = cx - wx * desiredScale;
+    const targetY = cy - wy * desiredScale;
+    animate(stage.scale, desiredScale, {
+      duration: 0.8,
+      ease: 'easeInOut',
+      onUpdate: (latest) => setStage((prev) => ({ ...prev, scale: latest }))
+    });
+    animate(stage.x, targetX, {
+      duration: 0.8,
+      ease: 'easeInOut',
+      onUpdate: (latest) => setStage((prev) => ({ ...prev, x: latest }))
+    });
+    animate(stage.y, targetY, {
+      duration: 0.8,
+      ease: 'easeInOut',
+      onUpdate: (latest) => setStage((prev) => ({ ...prev, y: latest }))
+    });
+  };
+
+  const getLastClientPoint = (clientId: string): { x: number; y: number } | null => {
+    const c = remoteCursors[clientId];
+    if (c) return { x: c.x, y: c.y };
+    const authored = linesRef.current.filter(l => l.authorId === clientId);
+    if (authored.length > 0) {
+      const last = authored[authored.length - 1];
+      const pts = last.points;
+      if (pts && pts.length >= 2) return { x: pts[pts.length - 2], y: pts[pts.length - 1] };
+    }
+    return null;
+  };
+
+  const teleportToClient = (clientId: string) => {
+    const p = getLastClientPoint(clientId);
+    if (!p) return;
+    teleportToPoint(p.x, p.y, 1);
+  };
 
   const ensureZoomRAF = useCallback(() => {
     if (rafRef.current != null) return;
@@ -475,11 +588,22 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
     if (message.name === 'new-line') {
       setLines((prev) => [...prev, message.data]);
+      try {
+        const pts: number[] = message.data?.points;
+        if (Array.isArray(pts) && pts.length >= 2) {
+          setRemoteCursors(prev => ({ ...prev, [message.clientId as string]: { x: pts[pts.length - 2], y: pts[pts.length - 1], t: Date.now() } }));
+        }
+      } catch {}
     } else if (message.name === 'update-line') {
       setLines((prev) => prev.map((l) => (l.id === message.data.id ? message.data : l)));
-    } else if (message.name === 'stage-update') {
-      zoomTargetRef.current = message.data as StageState;
-      ensureZoomRAF();
+      try {
+        const pts: number[] = message.data?.points;
+        if (Array.isArray(pts) && pts.length >= 2) {
+          setRemoteCursors(prev => ({ ...prev, [message.clientId as string]: { x: pts[pts.length - 2], y: pts[pts.length - 1], t: Date.now() } }));
+        }
+      } catch {}
+    } else if (message.name === 'stage-update' || message.name === 'stage-snapshot') {
+      try { stagesByClientRef.current[message.clientId as string] = message.data as StageState; } catch {}
     } else if (message.name === 'clear-canvas') {
       setLines([]);
       setMyUndoStack([]);
@@ -488,9 +612,9 @@ const Canvas = ({ roomId }: { roomId: string }) => {
       channel.publish('sync-state', { lines, stage });
     } else if (message.name === 'sync-state') {
       setLines(message.data.lines);
-      setStage(message.data.stage);
   setMyUndoStack([]);
   setMyRedoStack([]);
+      try { stagesByClientRef.current[message.clientId as string] = message.data.stage as StageState; } catch {}
   } else if (message.name === 'delete-line') {
       const id: string = message.data.id;
       setLines((prev) => {
@@ -515,8 +639,75 @@ const Canvas = ({ roomId }: { roomId: string }) => {
         }
         return [...without, line];
       });
+    } else if (message.name === 'cursor') {
+      const data = message.data as { x: number; y: number };
+      if (typeof data?.x === 'number' && typeof data?.y === 'number') {
+        setRemoteCursors(prev => ({ ...prev, [message.clientId as string]: { x: data.x, y: data.y, t: Date.now() } }));
+      }
+    } else if (message.name === 'stage-snapshot-request') {
+      try { channel.publish('stage-snapshot', stage); } catch {}
     }
   });
+
+  useEffect(() => {
+    if (!channel) return;
+
+    const refreshMembers = async () => {
+      try {
+        const list: any[] = await (channel.presence as any).get();
+        if (!Array.isArray(list)) return;
+        setMembers(
+          list.map((m) => ({
+            clientId: m.clientId,
+            nick: (m.data && (m.data.nick as string)) || fallbackNick(m.clientId),
+          }))
+        );
+      } catch {}
+    };
+
+    const onEnter = () => refreshMembers();
+    const onLeave = () => refreshMembers();
+    const onUpdate = () => refreshMembers();
+
+    try {
+      channel.presence.subscribe('enter', onEnter);
+      channel.presence.subscribe('leave', onLeave);
+      channel.presence.subscribe('update', onUpdate);
+    } catch {}
+    refreshMembers();
+
+    return () => {
+      try {
+        channel.presence.unsubscribe('enter', onEnter);
+        channel.presence.unsubscribe('leave', onLeave);
+        channel.presence.unsubscribe('update', onUpdate);
+      } catch {}
+    };
+  }, [channel, fallbackNick]);
+
+  useEffect(() => {
+    const cid = ably?.auth?.clientId as string | undefined;
+    if (!channel || !cid || !nickname) return;
+    try {
+      if (!presenceEnteredRef.current) {
+        channel.presence.enter({ nick: nickname });
+        presenceEnteredRef.current = true;
+      } else {
+        channel.presence.update({ nick: nickname });
+      }
+    } catch {}
+  }, [channel, ably?.auth?.clientId, nickname]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        if (presenceEnteredRef.current && channel) {
+          channel.presence.leave();
+          presenceEnteredRef.current = false;
+        }
+      } catch {}
+    };
+  }, [channel]);
 
   useEffect(() => {
     const preference = localStorage.getItem('meshink-save-preference');
@@ -529,13 +720,13 @@ const Canvas = ({ roomId }: { roomId: string }) => {
       if (savedLines) {
         try {
           setLines(JSON.parse(savedLines));
-          return;
         } catch (e) {
           console.error("Failed to parse saved lines:", e);
         }
       }
     }
     channel.publish('request-state', {});
+    try { channel.publish('stage-snapshot-request', {}); } catch {}
   }, [channel, roomId]);
 
   useEffect(() => {
@@ -552,10 +743,6 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     }
   }, [theme, color]);
 
-  const publishStageUpdate = useMemo(
-    () => throttle((s: StageState) => channel.publish('stage-update', s), 100),
-    [channel]
-  );
   const publishLineUpdate = useMemo(
     () => throttle((l: LineData) => channel.publish('update-line', l), 50),
     [channel]
@@ -634,11 +821,16 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     currentLineIdRef.current = lineId;
   };
 
+  const publishCursor = useMemo(() => throttle((pos: { x: number; y: number }) => {
+    try { channel.publish('cursor', pos); } catch {}
+  }, 40), [channel]);
+
   const handleMouseMove = () => {
     if (tool === 'pan') return;
     if (tool === 'select') {
       const pointer = getPointerPosition();
       if (!pointer) return;
+      publishCursor({ x: pointer.x, y: pointer.y });
       if (isRotatingRef.current && rotateDataRef.current) {
         const { originSnapshots, center, originAngle } = rotateDataRef.current;
         const dx = pointer.x - center.x;
@@ -897,6 +1089,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     if (!isDrawing.current) return;
     const pos = getPointerPosition();
     if (!pos) return;
+    publishCursor({ x: pos.x, y: pos.y });
     setLines((prev) => {
       const lastLine = prev[prev.length - 1];
       if (lastLine) {
@@ -1040,7 +1233,6 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     const newTarget = { scale: newScale, x: newX, y: newY } as StageState;
     zoomTargetRef.current = newTarget;
     ensureZoomRAF();
-  publishStageUpdate(newTarget);
   };
 
   const handleDragEnd = () => {
@@ -1048,14 +1240,12 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     if (!stage) return;
     const newStageState = { scale: stage.scaleX(), ...stage.position() } as StageState;
     setStage(newStageState);
-    publishStageUpdate(newStageState);
   };
 
   const handleDragMove = throttle((e: Konva.KonvaEventObject<DragEvent>) => {
     const s = e.target as Konva.Stage;
     const next = { scale: s.scaleX(), x: s.x(), y: s.y() } as StageState;
     setStage(next);
-    publishStageUpdate(next);
   }, 50);
 
   const undo = useCallback(() => {
@@ -1136,7 +1326,6 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   };
 
   const handleResetView = () => {
-    publishStageUpdate({ scale: 1, x: 0, y: 0 });
     animate(stage.scale, 1, {
       duration: 0.8,
       ease: 'easeInOut',
@@ -1448,6 +1637,59 @@ const SelectIcon = ({
         )}
       </AnimatePresence>
 
+      <NicknameModal
+        isOpen={isNickModalOpen}
+        initial={nickname}
+        onSave={(name) => {
+          const trimmed = name.trim();
+          if (!trimmed) return;
+          localStorage.setItem('meshink-nickname', trimmed);
+          setNickname(trimmed);
+          setNickModalOpen(false);
+        }}
+      />
+
+      <div className="absolute top-4 right-4 z-20 flex flex-col gap-2 p-3 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 shadow-2xl w-64 select-none">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-semibold">Participants</span>
+          <button
+            className="text-xs px-2 py-1 rounded-md bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600"
+            onClick={() => setNickModalOpen(true)}
+            title="Change nickname"
+          >
+            Change
+          </button>
+        </div>
+        <div className="flex flex-col gap-1 max-h-60 overflow-auto">
+          {members
+            .slice()
+            .sort((a, b) => (a.clientId === (ably?.auth?.clientId as string) ? -1 : b.clientId === (ably?.auth?.clientId as string) ? 1 : a.nick.localeCompare(b.nick)))
+            .map((m) => {
+              const self = m.clientId === (ably?.auth?.clientId as string);
+              const canTeleport = !!getLastClientPoint(m.clientId);
+              return (
+                <button
+                  key={m.clientId}
+                  onClick={() => !self && canTeleport && teleportToClient(m.clientId)}
+                  disabled={self || !canTeleport}
+                  className={clsx(
+                    'w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm',
+                    self ? 'bg-blue-500 text-white cursor-default' : 'bg-white/70 dark:bg-slate-700/60 hover:bg-slate-200 dark:hover:bg-slate-700',
+                    (!self && !canTeleport) && 'opacity-60 cursor-not-allowed'
+                  )}
+                  title={self ? 'This is you' : (canTeleport ? 'Jump to this user view' : 'No view data yet')}
+                >
+                  <span className="truncate">{self ? `${m.nick} (You)` : m.nick}</span>
+                  {!self && <span className="text-xs opacity-80">Teleport</span>}
+                </button>
+              );
+            })}
+          {members.length === 0 && (
+            <div className="text-xs text-slate-500 dark:text-slate-400 px-1 py-2">No participants</div>
+          )}
+        </div>
+      </div>
+
   <div className="absolute top-1/2 -translate-y-1/2 left-4 z-10 flex flex-col items-center gap-4 p-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 shadow-2xl w-16 select-none">
         <div className="flex flex-col gap-1">
           <ToolButton name="pen"><PencilIcon /></ToolButton>
@@ -1506,6 +1748,21 @@ const SelectIcon = ({
       >
   {isGridVisible && <GridLayer stage={stage} width={dimensions.width} height={dimensions.height} theme={theme} />}
         <Layer>
+          {Object.entries(remoteCursors).map(([cid, c]) => {
+            const isSelf = cid === (ably?.auth?.clientId as string);
+            if (isSelf) return null;
+            if (Date.now() - c.t > 3000) return null;
+            const user = members.find(m => m.clientId === cid);
+            const nick = user?.nick || fallbackNick(cid);
+            const r = Math.max(3, Math.min(8, 6 / stage.scale));
+            const yOffset = -10 / stage.scale;
+            return (
+              <React.Fragment key={cid}>
+                <Circle x={c.x} y={c.y} radius={r} fill={theme === 'dark' ? '#38bdf8' : '#0ea5e9'} listening={false} />
+                <Text x={c.x + 8 / stage.scale} y={c.y + yOffset} text={nick} fontSize={12 / stage.scale} fill={theme === 'dark' ? '#e2e8f0' : '#0f172a'} listening={false} />
+              </React.Fragment>
+            );
+          })}
           {lines.map((line) => (
             <Line
               key={line.id}
