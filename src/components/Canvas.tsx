@@ -450,6 +450,63 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const presenceEnteredRef = useRef(false);
   const fallbackNick = useCallback((id: string) => `User ${String(id || '').slice(0, 4).toUpperCase()}`, []);
   const [remoteCursors, setRemoteCursors] = useState<Record<string, { x: number; y: number; t: number }>>({});
+  const [cursorColors, setCursorColors] = useState<Record<string, string>>({});
+  const cursorColorStorageKey = 'meshink-cursor-color-map';
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(cursorColorStorageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') setCursorColors(parsed);
+      }
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem(cursorColorStorageKey, JSON.stringify(cursorColors)); } catch {}
+  }, [cursorColors]);
+  const generateColorForId = useCallback((id: string) => {
+    let hash = 0;
+    for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+    const hue = hash % 360;
+    const sat = 65;
+    const light = 55;
+    return `hsl(${hue} ${sat}% ${light}%)`;
+  }, []);
+  useEffect(() => {
+    if (members.length === 0) return;
+    setCursorColors(prev => {
+      let changed = false;
+      const next = { ...prev };
+      members.forEach(m => {
+        if (!next[m.clientId]) {
+          next[m.clientId] = generateColorForId(m.clientId);
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [members, generateColorForId]);
+  const updateCursorColor = (clientId: string, color: string) => {
+    setCursorColors(prev => ({ ...prev, [clientId]: color }));
+  };
+  const [openColorEditor, setOpenColorEditor] = useState<null | { clientId: string; anchorRect: DOMRect }>(null);
+  const [showCustomCursorPicker, setShowCustomCursorPicker] = useState(false);
+  const colorSwatches = ['#ef4444','#f97316','#f59e0b','#eab308','#84cc16','#10b981','#06b6d4','#0ea5e9','#6366f1','#8b5cf6','#d946ef','#ec4899','#f43f5e','#6b7280','#ffffff','#000000'];
+  const closeColorEditor = () => setOpenColorEditor(null);
+  useEffect(() => {
+    if (!openColorEditor) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeColorEditor(); };
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('[data-cursor-color-popover]')) return;
+      if (target.closest('[data-cursor-color-trigger]')) return;
+      closeColorEditor();
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('mousedown', onDown);
+    return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('mousedown', onDown); };
+  }, [openColorEditor]);
 
   useEffect(() => {
     linesRef.current = lines;
@@ -1719,25 +1776,117 @@ const SelectIcon = ({
             .map((m) => {
               const self = m.clientId === (ably?.auth?.clientId as string);
               const canTeleport = !!getLastClientPoint(m.clientId);
+              const color = cursorColors[m.clientId] || '#0ea5e9';
               return (
-                <button
-                  key={m.clientId}
-                  onClick={() => !self && canTeleport && teleportToClient(m.clientId)}
-                  disabled={self || !canTeleport}
-                  className={clsx(
-                    'w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm',
-                    self ? 'bg-blue-500 text-white cursor-default' : 'bg-white/70 dark:bg-slate-700/60 hover:bg-slate-200 dark:hover:bg-slate-700',
-                    (!self && !canTeleport) && 'opacity-60 cursor-not-allowed'
-                  )}
-                  title={self ? 'This is you' : (canTeleport ? 'Jump to this user view' : 'No view data yet')}
-                >
-                  <span className="truncate">{self ? `${m.nick} (You)` : m.nick}</span>
-                  {!self && <span className="text-xs opacity-80">Teleport</span>}
-                </button>
+                <div key={m.clientId} className="flex items-center gap-2 group relative">
+                  <button
+                    type="button"
+                    data-cursor-color-trigger
+                    onClick={(e) => {
+                      if (self) return; // user cannot change their own representation? (we allow editing others only as requested)
+                      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                      setOpenColorEditor({ clientId: m.clientId, anchorRect: rect });
+                    }}
+                    title={self ? 'Your color is automatic' : 'Change this user\'s cursor color (local only)'}
+                    className={clsx('w-3.5 h-3.5 rounded-full border border-white/40 shadow-sm shrink-0', !self && 'cursor-pointer hover:scale-110 transition-transform', self && 'opacity-80')}
+                    style={{ background: color }}
+                    aria-label={!self ? `Edit color for ${m.nick}` : undefined}
+                  />
+                  <button
+                    onClick={() => !self && canTeleport && teleportToClient(m.clientId)}
+                    disabled={self || !canTeleport}
+                    className={clsx(
+                      'flex-1 flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors',
+                      self ? 'bg-blue-500 text-white cursor-default' : 'bg-white/60 dark:bg-slate-700/50 hover:bg-white/80 dark:hover:bg-slate-600/80',
+                      (!self && !canTeleport) && 'opacity-60 cursor-not-allowed'
+                    )}
+                    title={self ? 'This is you' : (canTeleport ? 'Jump to this user view' : 'No view data yet')}
+                  >
+                    <span className="truncate">{self ? `${m.nick} (You)` : m.nick}</span>
+                    {!self && <span className="text-xs opacity-70 group-hover:opacity-90">Teleport</span>}
+                  </button>
+                </div>
               );
             })}
-          {members.length === 0 && (
-            <div className="text-xs text-slate-500 dark:text-slate-400 px-1 py-2">No participants</div>
+          {openColorEditor && typeof window !== 'undefined' && createPortal(
+            (() => {
+              const { anchorRect, clientId } = openColorEditor;
+              const existing = cursorColors[clientId] || '#0ea5e9';
+              const top = anchorRect.top + window.scrollY + anchorRect.height + 6;
+              const left = Math.min(
+                Math.max(anchorRect.left + window.scrollX - 80, 8),
+                window.innerWidth - 256 - 8
+              );
+              const setColor = (c: string) => updateCursorColor(clientId, c);
+              return (
+                <div
+                  data-cursor-color-popover
+                  className="fixed z-[9999] w-64 p-3 rounded-xl bg-slate-900/95 dark:bg-slate-900 backdrop-blur border border-slate-700 shadow-2xl flex flex-col gap-3 text-xs font-sans"
+                  style={{ top, left }}
+                  role="dialog"
+                  aria-label="Edit cursor color"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium text-slate-200 truncate mr-2">Cursor Color</span>
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => { setShowCustomCursorPicker(false); }}
+                        className={clsx('px-2 py-1 rounded-md text-[10px] transition-colors', !showCustomCursorPicker ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600')}
+                      >Presets</button>
+                      <button
+                        onClick={() => { setShowCustomCursorPicker(true); }}
+                        className={clsx('px-2 py-1 rounded-md text-[10px] transition-colors', showCustomCursorPicker ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600')}
+                      >Custom</button>
+                      <button
+                        onClick={() => { setColor(generateColorForId(clientId)); }}
+                        className="px-2 py-1 rounded-md text-[10px] bg-slate-700 text-slate-300 hover:bg-slate-600"
+                        title="Reset to auto"
+                      >Reset</button>
+                    </div>
+                  </div>
+                  {!showCustomCursorPicker && (
+                    <div className="grid grid-cols-8 gap-1" aria-label="Preset colors">
+                      {colorSwatches.map(c => (
+                        <button
+                          key={c}
+                          onClick={() => setColor(c)}
+                          className={clsx('w-6 h-6 rounded-md border border-black/20 dark:border-white/10 hover:scale-110 transition-transform focus:outline-none focus:ring-2 focus:ring-blue-500', existing.toLowerCase() === c.toLowerCase() && 'ring-2 ring-offset-1 ring-blue-500 ring-offset-slate-900')}
+                          style={{ background: c }}
+                          aria-label={`Set color ${c}`}
+                        />
+                      ))}
+                    </div>
+                  )}
+                  {showCustomCursorPicker && (
+                    <div className="flex flex-col gap-2" aria-label="Custom color picker">
+                      <HexColorPicker color={(/^#([0-9a-fA-F]{3,8})$/.test(existing) ? existing : '#0ea5e9')} onChange={(c) => setColor(c)} />
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-slate-400 shrink-0">Hex</span>
+                    <input
+                      type="text"
+                      value={existing.startsWith('#') ? existing : '#'}
+                      onChange={(e) => {
+                        const val = e.target.value.trim();
+                        if (/^#([0-9a-fA-F]{3,8})$/.test(val)) setColor(val);
+                      }}
+                      maxLength={9}
+                      className="flex-1 min-w-0 px-2 py-1 rounded-md bg-slate-800 border border-slate-600 text-slate-200 text-xs outline-none focus:ring-2 focus:ring-blue-500"
+                      aria-label="Hex color value"
+                    />
+                    <div className="w-6 h-6 rounded-md border border-slate-600 shrink-0" style={{ background: existing }} aria-hidden />
+                  </div>
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button
+                      onClick={() => { closeColorEditor(); setShowCustomCursorPicker(false); }}
+                      className="px-3 py-1.5 rounded-md text-[11px] bg-slate-700 text-slate-200 hover:bg-slate-600"
+                    >Close</button>
+                  </div>
+                </div>
+              );
+            })(),
+            document.body
           )}
         </div>
       </div>
@@ -1811,9 +1960,10 @@ const SelectIcon = ({
             const nick = user?.nick || fallbackNick(cid);
             const r = Math.max(3, Math.min(8, 6 / stage.scale));
             const yOffset = -10 / stage.scale;
+            const fillColor = cursorColors[cid] || (theme === 'dark' ? '#38bdf8' : '#0ea5e9');
             return (
               <React.Fragment key={cid}>
-                <Circle x={c.x} y={c.y} radius={r} fill={theme === 'dark' ? '#38bdf8' : '#0ea5e9'} listening={false} />
+                <Circle x={c.x} y={c.y} radius={r} fill={fillColor} listening={false} />
                 <Text x={c.x + 8 / stage.scale} y={c.y + yOffset} text={nick} fontSize={12 / stage.scale} fill={theme === 'dark' ? '#e2e8f0' : '#0f172a'} listening={false} />
               </React.Fragment>
             );
