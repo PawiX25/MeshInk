@@ -402,7 +402,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
   const [lines, setLines] = useState<LineData[]>([]);
   const [stage, setStage] = useState<StageState>({ scale: 1, x: 0, y: 0 });
-  const [tool, setTool] = useState<'pen' | 'pan' | 'eraser' | 'select'>('pen');
+  const [tool, setTool] = useState<'pen' | 'pan' | 'eraser' | 'select' | 'rect' | 'circle' | 'line'>('pen');
   const [color, setColor] = useState('#000000');
   const [strokeWidth, setStrokeWidth] = useState(5);
   const [isGridVisible, setGridVisible] = useState(true);
@@ -412,6 +412,8 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const [savePreference, setSavePreference] = useState<'allow' | 'deny' | 'prompt'>('prompt');
   
   const isDrawing = useRef(false);
+  const shapeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const shapeTypeRef = useRef<'rect' | 'circle' | 'line' | null>(null);
   const stageRef = useRef<Konva.Stage>(null);
   const zoomTargetRef = useRef<StageState>({ scale: 1, x: 0, y: 0 });
   const rafRef = useRef<number | null>(null);
@@ -940,7 +942,17 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     if (!pos) return;
     const cid = (ably?.auth?.clientId as string) || provisionalIdRef.current;
     const lineId = `${cid}-${Date.now()}`;
-    const newLine: LineData = { id: lineId, points: [pos.x, pos.y], color, strokeWidth, tool, authorId: cid };
+    const shapeTools: Set<string> = new Set(['rect', 'circle', 'line']);
+    if (shapeTools.has(tool)) {
+      shapeStartRef.current = { x: pos.x, y: pos.y };
+      shapeTypeRef.current = tool as 'rect' | 'circle' | 'line';
+      const newLine: LineData = { id: lineId, points: [pos.x, pos.y], color, strokeWidth, tool: 'pen', authorId: cid };
+      setLines((prev) => [...prev, newLine]);
+      channel.publish('new-line', newLine);
+      currentLineIdRef.current = lineId;
+      return;
+    }
+    const newLine: LineData = { id: lineId, points: [pos.x, pos.y], color, strokeWidth, tool: tool === 'eraser' ? 'eraser' : 'pen', authorId: cid };
     setLines((prev) => [...prev, newLine]);
     channel.publish('new-line', newLine);
     currentLineIdRef.current = lineId;
@@ -1215,6 +1227,34 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     if (!pos) return;
     setMyCursor({ x: pos.x, y: pos.y });
     publishCursor({ x: pos.x, y: pos.y });
+    if (shapeTypeRef.current && shapeStartRef.current && currentLineIdRef.current) {
+      const start = shapeStartRef.current;
+      const kind = shapeTypeRef.current;
+      let points: number[] = [];
+      if (kind === 'line') {
+        points = [start.x, start.y, pos.x, pos.y];
+      } else if (kind === 'rect') {
+        const x1 = start.x, y1 = start.y, x2 = pos.x, y2 = pos.y;
+        points = [x1, y1, x2, y1, x2, y2, x1, y2, x1, y1]; 
+      } else if (kind === 'circle') {
+        const cx = (start.x + pos.x) / 2;
+        const cy = (start.y + pos.y) / 2;
+        const rx = Math.abs(pos.x - start.x) / 2;
+        const ry = Math.abs(pos.y - start.y) / 2;
+        const steps = 40;
+        for (let i = 0; i <= steps; i++) {
+          const t = (i / steps) * Math.PI * 2;
+            points.push(cx + rx * Math.cos(t), cy + ry * Math.sin(t));
+        }
+      }
+      setLines(prev => prev.map(l => {
+        if (l.id !== currentLineIdRef.current) return l;
+        const updated = { ...l, points };
+        publishLineUpdate(updated);
+        return updated;
+      }));
+      return;
+    }
     if (!isDrawing.current) return;
     setLines((prev) => {
       const lastLine = prev[prev.length - 1];
@@ -1327,7 +1367,9 @@ const Canvas = ({ roomId }: { roomId: string }) => {
       }
       return;
     }
-    isDrawing.current = false;
+  isDrawing.current = false;
+  shapeStartRef.current = null;
+  shapeTypeRef.current = null;
     const currentId = currentLineIdRef.current;
     if (!currentId) return;
     const idx = linesRef.current.findIndex((l) => l.id === currentId);
@@ -1537,7 +1579,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     isDrawing.current = false;
     const stage = stageRef.current;
     if (stage) {
-      const cursor = { pen: 'crosshair', pan: 'grab', eraser: 'cell', select: 'default' }[tool];
+      const cursor = { pen: 'crosshair', pan: 'grab', eraser: 'cell', select: 'default', rect: 'crosshair', circle: 'crosshair', line: 'crosshair' }[tool];
       stage.container().style.cursor = cursor;
     }
     if (tool !== 'select') {
@@ -1670,7 +1712,7 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     }
   };
 
-  const ToolButton = ({ name, children }: { name: 'pen' | 'pan' | 'eraser' | 'select', children: React.ReactNode }) => (
+  const ToolButton = ({ name, children }: { name: 'pen' | 'pan' | 'eraser' | 'select' | 'rect' | 'circle' | 'line', children: React.ReactNode }) => (
     <button onClick={() => setTool(name)} title={name.charAt(0).toUpperCase() + name.slice(1)} className={clsx('p-3 rounded-lg', { 'bg-blue-500 text-white': tool === name, 'hover:bg-slate-200 dark:hover:bg-slate-700': tool !== name }) }>
       {children}
     </button>
@@ -1748,6 +1790,16 @@ const SelectIcon = ({
       <polyline points="23 4 23 10 17 10" />
       <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
     </svg>
+  );
+
+  const RectIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="4" y="6" width="16" height="12" rx="2"/></svg>
+  );
+  const EllipseIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><ellipse cx="12" cy="12" rx="8" ry="5"/></svg>
+  );
+  const LineIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="20" x2="20" y2="4"/></svg>
   );
 
   const ZoomIndicator = ({ scale }: { scale: number }) => {
@@ -1972,6 +2024,9 @@ const SelectIcon = ({
           <ToolButton name="eraser"><EraserIcon /></ToolButton>
           <ToolButton name="pan"><HandIcon /></ToolButton>
           <ToolButton name="select"><SelectIcon active={tool === 'select'} mode={(theme === 'dark' || theme === 'light') ? theme : undefined} /></ToolButton>
+          <ToolButton name="rect"><RectIcon /></ToolButton>
+          <ToolButton name="circle"><EllipseIcon /></ToolButton>
+          <ToolButton name="line"><LineIcon /></ToolButton>
         </div>
         <hr className="w-full border-slate-300 dark:border-slate-600" />
   <ZoomIndicator scale={stage.scale} />
