@@ -447,7 +447,12 @@ const Canvas = ({ roomId }: { roomId: string }) => {
   const stagesByClientRef = useRef<Record<string, StageState>>({});
   const presenceEnteredRef = useRef(false);
   const fallbackNick = useCallback((id: string) => `User ${String(id || '').slice(0, 4).toUpperCase()}`, []);
-  const [remoteCursors, setRemoteCursors] = useState<Record<string, { x: number; y: number; t: number }>>({});
+  const [remoteCursors, setRemoteCursors] = useState<Record<string, { x: number; y: number; t: number; message?: string; messageExpires?: number; messageId?: string }>>({});
+  const [myCursor, setMyCursor] = useState<{ x: number; y: number } | null>(null);
+  const [messageInputOpen, setMessageInputOpen] = useState(false);
+  const [messageDraft, setMessageDraft] = useState('');
+  const messageInputRef = useRef<HTMLInputElement | null>(null);
+  const [htmlMessages, setHtmlMessages] = useState<Record<string, { text: string; x: number; y: number; expires: number; nick: string; color: string }>>({});
   const [cursorColors, setCursorColors] = useState<Record<string, string>>({});
   const cursorColorStorageKey = 'meshink-cursor-color-map';
   useEffect(() => {
@@ -648,7 +653,15 @@ const Canvas = ({ roomId }: { roomId: string }) => {
       try {
         const pts: number[] = message.data?.points;
         if (Array.isArray(pts) && pts.length >= 2) {
-          setRemoteCursors(prev => ({ ...prev, [message.clientId as string]: { x: pts[pts.length - 2], y: pts[pts.length - 1], t: Date.now() } }));
+          setRemoteCursors(prev => ({
+            ...prev,
+            [message.clientId as string]: {
+              ...prev[message.clientId as string],
+              x: pts[pts.length - 2],
+              y: pts[pts.length - 1],
+              t: Date.now(),
+            }
+          }));
         }
       } catch {}
     } else if (message.name === 'update-line') {
@@ -656,7 +669,15 @@ const Canvas = ({ roomId }: { roomId: string }) => {
       try {
         const pts: number[] = message.data?.points;
         if (Array.isArray(pts) && pts.length >= 2) {
-          setRemoteCursors(prev => ({ ...prev, [message.clientId as string]: { x: pts[pts.length - 2], y: pts[pts.length - 1], t: Date.now() } }));
+          setRemoteCursors(prev => ({
+            ...prev,
+            [message.clientId as string]: {
+              ...prev[message.clientId as string],
+              x: pts[pts.length - 2],
+              y: pts[pts.length - 1],
+              t: Date.now(),
+            }
+          }));
         }
       } catch {}
     } else if (message.name === 'stage-update' || message.name === 'stage-snapshot') {
@@ -699,10 +720,51 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     } else if (message.name === 'cursor') {
       const data = message.data as { x: number; y: number };
       if (typeof data?.x === 'number' && typeof data?.y === 'number') {
-        setRemoteCursors(prev => ({ ...prev, [message.clientId as string]: { x: data.x, y: data.y, t: Date.now() } }));
+        setRemoteCursors(prev => ({
+          ...prev,
+            [message.clientId as string]: {
+              ...prev[message.clientId as string],
+              x: data.x,
+              y: data.y,
+              t: Date.now(),
+            }
+        }));
       }
     } else if (message.name === 'stage-snapshot-request') {
       try { channel.publish('stage-snapshot', stage); } catch {}
+    } else if (message.name === 'cursor-message') {
+      const data = message.data as { text?: string; x?: number; y?: number; id?: string; ttlMs?: number };
+      if (typeof data?.text === 'string' && data.text.trim()) {
+        const user = members.find(m => m.clientId === message.clientId);
+        const nick = user?.nick || fallbackNick(message.clientId as string);
+        const color = cursorColors[message.clientId as string] || (theme === 'dark' ? '#38bdf8' : '#0ea5e9');
+        const expires = Date.now() + (typeof data.ttlMs === 'number' ? data.ttlMs : 4000);
+        
+        setHtmlMessages(prev => ({
+          ...prev,
+          [message.clientId as string]: {
+            text: data.text as string,
+            x: data.x ?? 0,
+            y: data.y ?? 0,
+            expires,
+            nick,
+            color
+          }
+        }));
+        
+        setRemoteCursors(prev => {
+          const existing = prev[message.clientId as string] || { x: data.x ?? 0, y: data.y ?? 0, t: Date.now() };
+          return {
+            ...prev,
+            [message.clientId as string]: {
+              ...existing,
+              x: typeof data.x === 'number' ? data.x : existing.x,
+              y: typeof data.y === 'number' ? data.y : existing.y,
+              t: Date.now()
+            }
+          };
+        });
+      }
     }
   });
 
@@ -711,7 +773,13 @@ const Canvas = ({ roomId }: { roomId: string }) => {
 
     const refreshMembers = async () => {
       try {
-        const list: any[] = await (channel.presence as any).get();
+        type PresenceMember = { clientId: string; data?: { nick?: string } };
+        const presence = channel.presence as unknown as {
+          get(): Promise<PresenceMember[] | undefined>;
+          subscribe(event: string, cb: () => void): void;
+          unsubscribe(event: string, cb: () => void): void;
+        };
+        const list = await presence.get();
         if (!Array.isArray(list)) return;
         setMembers(
           list.map((m) => ({
@@ -805,13 +873,13 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     [channel]
   );
 
-  const getPointerPosition = () => {
+  const getPointerPosition = useCallback(() => {
     const stage = stageRef.current;
     if (!stage) return null;
     const pointer = stage.getPointerPosition();
     if (!pointer) return null;
     return stage.getAbsoluteTransform().copy().invert().point(pointer);
-  };
+  }, []);
 
   const handleMouseDown = () => {
     if (tool === 'pan') return;
@@ -1143,10 +1211,11 @@ const Canvas = ({ roomId }: { roomId: string }) => {
       }
       return;
     }
-    if (!isDrawing.current) return;
     const pos = getPointerPosition();
     if (!pos) return;
+    setMyCursor({ x: pos.x, y: pos.y });
     publishCursor({ x: pos.x, y: pos.y });
+    if (!isDrawing.current) return;
     setLines((prev) => {
       const lastLine = prev[prev.length - 1];
       if (lastLine) {
@@ -1269,6 +1338,64 @@ const Canvas = ({ roomId }: { roomId: string }) => {
     }
     currentLineIdRef.current = null;
   };
+
+  const sendCursorMessage = useCallback((text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const ttlMs = 4000;
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    const pos = myCursor || getPointerPosition() || { x: 0, y: 0 };
+    try { channel.publish('cursor-message', { text: trimmed, x: pos.x, y: pos.y, id, ttlMs }); } catch {}
+  }, [channel, myCursor, getPointerPosition]);
+
+  useEffect(() => {
+    if (messageInputOpen) {
+      setTimeout(() => { messageInputRef.current?.focus(); }, 0);
+    } else {
+      setMessageDraft('');
+    }
+  }, [messageInputOpen]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'm' && !messageInputOpen && !isNickModalOpen) {
+        if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
+        setMessageInputOpen(true);
+      } else if (e.key === 'Escape' && messageInputOpen) {
+        setMessageInputOpen(false);
+      } else if (e.key === 'Enter' && messageInputOpen) {
+        e.preventDefault();
+        if (messageDraft.trim()) {
+          sendCursorMessage(messageDraft);
+          setMessageInputOpen(false);
+        } else {
+          setMessageInputOpen(false);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [messageInputOpen, messageDraft, isNickModalOpen, sendCursorMessage]);
+
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setHtmlMessages(prev => {
+        const next: typeof prev = {};
+        let changed = false;
+        for (const [k, v] of Object.entries(prev)) {
+          if (v.expires > now) {
+            next[k] = v;
+          } else {
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 500);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault();
@@ -1897,22 +2024,6 @@ const SelectIcon = ({
       >
   {isGridVisible && <GridLayer stage={stage} width={dimensions.width} height={dimensions.height} theme={theme} />}
         <Layer>
-          {Object.entries(remoteCursors).map(([cid, c]) => {
-            const isSelf = cid === (ably?.auth?.clientId as string);
-            if (isSelf) return null;
-            if (Date.now() - c.t > 3000) return null;
-            const user = members.find(m => m.clientId === cid);
-            const nick = user?.nick || fallbackNick(cid);
-            const r = Math.max(3, Math.min(8, 6 / stage.scale));
-            const yOffset = -10 / stage.scale;
-            const fillColor = cursorColors[cid] || (theme === 'dark' ? '#38bdf8' : '#0ea5e9');
-            return (
-              <React.Fragment key={cid}>
-                <Circle x={c.x} y={c.y} radius={r} fill={fillColor} listening={false} />
-                <Text x={c.x + 8 / stage.scale} y={c.y + yOffset} text={nick} fontSize={12 / stage.scale} fill={theme === 'dark' ? '#e2e8f0' : '#0f172a'} listening={false} />
-              </React.Fragment>
-            );
-          })}
           {lines.map((line) => (
             <Line
               key={line.id}
@@ -2098,8 +2209,100 @@ const SelectIcon = ({
               />
             </>
           )}
+          {Object.entries(remoteCursors).map(([cid, c]) => {
+            const isSelf = cid === (ably?.auth?.clientId as string);
+            if (isSelf) return null;
+            if (Date.now() - c.t > 3000) return null;
+            const user = members.find(m => m.clientId === cid);
+            const nick = user?.nick || fallbackNick(cid);
+            const r = Math.max(3, Math.min(8, 6 / stage.scale));
+            const yOffset = -10 / stage.scale;
+            const fillColor = cursorColors[cid] || (theme === 'dark' ? '#38bdf8' : '#0ea5e9');
+            const fontSize = 12 / stage.scale;
+            return (
+              <React.Fragment key={cid}>
+                <Circle x={c.x} y={c.y} radius={r} fill={fillColor} listening={false} />
+                <Text x={c.x + 8 / stage.scale} y={c.y + yOffset} text={nick} fontSize={fontSize} fill={theme === 'dark' ? '#e2e8f0' : '#0f172a'} listening={false} />
+              </React.Fragment>
+            );
+          })}
         </Layer>
       </Stage>
+      {messageInputOpen && myCursor && (
+        (() => {
+          const screenX = myCursor.x * stage.scale + stage.x;
+          const screenY = myCursor.y * stage.scale + stage.y;
+          return (
+            <div
+              className="pointer-events-auto absolute z-50"
+              style={{ left: screenX + 12, top: screenY - 32 }}
+            >
+              <input
+                ref={messageInputRef}
+                value={messageDraft}
+                onChange={e => setMessageDraft(e.target.value.slice(0, 120))}
+                placeholder="Message… (Enter to send, Esc to cancel)"
+                className="px-2 py-1 rounded-md text-xs shadow bg-white/90 dark:bg-slate-800/90 border border-slate-300 dark:border-slate-600 text-slate-800 dark:text-slate-100 outline-none focus:ring-2 focus:ring-blue-500 w-56"
+                onPointerDown={e => e.stopPropagation()}
+              />
+            </div>
+          );
+        })()
+      )}
+      {Object.entries(htmlMessages).map(([cid, msg]) => {
+        if (msg.expires <= Date.now()) return null;
+        const rc = remoteCursors[cid as string];
+        const worldX = typeof rc?.x === 'number' ? rc.x : msg.x;
+        const worldY = typeof rc?.y === 'number' ? rc.y : msg.y;
+        const screenX = worldX * stage.scale + stage.x;
+        const screenY = worldY * stage.scale + stage.y;
+        
+        return (
+          <div
+            key={`${cid}-${msg.expires}`}
+            className="absolute pointer-events-none z-40"
+            style={{ 
+              left: screenX + 22, 
+              top: screenY,
+              transform: 'translateY(-50%)'
+            }}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
+              className="relative"
+            >
+              <div 
+                className="absolute -left-1.5 top-1/2 -translate-y-1/2 w-3 h-3 rotate-45"
+                style={{ 
+                  backgroundColor: theme === 'dark' ? '#1e293b' : '#ffffff',
+                  borderLeft: '1px solid',
+                  borderBottom: '1px solid',
+                  borderColor: theme === 'dark' ? '#334155' : '#e2e8f0'
+                }}
+              />
+              <div className={clsx(
+                "relative px-3 py-2 rounded-lg max-w-[220px] shadow-lg backdrop-blur-sm",
+                theme === 'dark' 
+                  ? 'bg-slate-800/95 border border-slate-700/50 text-slate-100' 
+                  : 'bg-white/95 border border-slate-200/50 text-slate-900'
+              )}>
+                <div className="text-[10px] font-medium mb-0.5 opacity-70" style={{ color: msg.color }}>
+                  {msg.nick}
+                </div>
+                <div className="text-xs leading-relaxed break-words">
+                  {msg.text}
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        );
+      })}
+      <div className="absolute bottom-3 left-1/2 -translate-x-1/2 text-[10px] px-2 py-1 rounded bg-slate-900/60 text-slate-200 pointer-events-none select-none">
+  Press &apos;m&apos; to send a quick cursor message
+      </div>
     </div>
   );
 };
